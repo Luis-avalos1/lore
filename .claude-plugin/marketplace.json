@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-marketplace.json",
   "name": "lore",
-  "description": "Persistent repo knowledge for Claude Code: learn once, remember forever, refresh on drift.",
+  "description": "Staleness watchdog for CLAUDE.md in Claude Code. Detects drift and refreshes a small managed block.",
   "owner": {
     "name": "Luis Avalos",
     "email": "avaloseluis@gmail.com"
@@ -10,13 +10,13 @@
     {
       "name": "lore",
       "source": "./plugins/lore",
-      "description": "Auto-learns your repo, writes a managed CLAUDE.md section, seeds per-project memory, and silently watches for drift so Claude wastes fewer tool calls re-discovering the same context every session.",
+      "description": "A staleness watchdog for CLAUDE.md. /lore:refresh keeps a small managed block (stack + commands + version pins) synced to the current commit. A SessionStart hook silently flags drift so you know when to refresh.",
       "keywords": [
-        "onboarding",
-        "memory",
         "claude-md",
-        "context",
-        "repo-analysis"
+        "drift-detection",
+        "staleness",
+        "session-hook",
+        "watchdog"
       ],
       "category": "development-workflows"
     }

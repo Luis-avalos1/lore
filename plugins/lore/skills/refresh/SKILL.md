@@ -1,146 +1,149 @@
 ---
-description: Incrementally update the lore-managed CLAUDE.md block and memory files based on what has changed since the last /lore:learn or /lore:refresh. Use when the SessionStart hook reports drift, after a major refactor, or whenever the user asks lore to update what it knows. Cheaper than re-learning from scratch — only re-reads files that git shows changed.
-when_to_use: When a lore state file already exists and the repo has drifted (new commits, modified manifests, new dependencies). Reads the existing lore-managed block and only re-derives what the change set could plausibly affect. If no state file exists, defer to /lore:learn.
-allowed-tools: Bash(git *) Bash(jq *) Bash(mkdir *) Bash(ls *) Bash(cat *) Bash(test *) Bash(wc *) Bash(date *) Bash(grep *) Bash(find *) Bash(echo *) Read Write Edit Glob Grep
+description: Keep a small lore-managed block at the top of CLAUDE.md fresh as the repo evolves. First run sets a baseline; later runs only re-derive what git shows changed. Use when the SessionStart hook reports drift, after a dependency bump or major refactor, or whenever the user wants CLAUDE.md re-blessed against the current HEAD.
+when_to_use: First-run bootstrap (no state file) or incremental refresh (state file + drift detected). Manages a small section of CLAUDE.md — stack identifiers, commands, version pins, last-refresh metadata. Never touches content outside the markers.
+allowed-tools: Bash(bash *) Bash(git *) Bash(jq *) Bash(mkdir *) Bash(ls *) Bash(cat *) Bash(test *) Bash(wc *) Bash(date *) Bash(grep *) Bash(find *) Bash(echo *) Bash(sed *) Bash(awk *) Read Write Edit Glob Grep
 disable-model-invocation: false
 ---
 
-# /lore:refresh — incrementally update what lore knows
+# /lore:refresh — keep CLAUDE.md fresh against drift
 
-You are running a *refresh*, not a fresh onboard. Your job is to be conservative: keep what's still accurate, change only what the change set since `lastLearnedSha` actually affects. This is much cheaper than `/lore:learn` because you only touch the files git tells you matter.
+lore is small on purpose. Its only job is to keep a tiny block at the top of `CLAUDE.md` synced with what's actually in the repo, and to notice when that block has gone stale. Architecture, conventions, and prose stay human-curated below.
 
-If there is no `.claude/lore-state.json`, abort and tell the user to run `/lore:learn` instead.
+This skill has two modes, picked automatically based on whether a state file exists:
+
+- **Bootstrap** (`.claude/lore-state.json` does not exist): light reconnaissance, write a small lore-managed block at the top of CLAUDE.md, write the state file at the current SHA. Bootstrap is intentionally lean — use `/init` first if you want a full Claude Code-generated CLAUDE.md; lore only manages the small block.
+- **Refresh** (state file exists, repo has drifted): re-derive only the fields the change set affects, update the managed block in place, bump the state file SHA.
 
 ## Live drift context
 
-```!
-echo "=== state file ==="
-if test -f .claude/lore-state.json; then
-  cat .claude/lore-state.json
-else
-  echo "NO_STATE"
-fi
-echo
-echo "=== current HEAD ==="
-git rev-parse HEAD 2>/dev/null || echo "(not a git repo)"
-git rev-parse --abbrev-ref HEAD 2>/dev/null
-echo
-echo "=== changes since lastLearnedSha ==="
-LAST_SHA="$(jq -r '.lastLearnedSha // empty' .claude/lore-state.json 2>/dev/null)"
-if [ -n "$LAST_SHA" ] && git cat-file -e "$LAST_SHA" 2>/dev/null; then
-  echo "commits: $(git rev-list --count "$LAST_SHA"..HEAD 2>/dev/null)"
-  echo "--- changed files ---"
-  git diff --name-only "$LAST_SHA"..HEAD 2>/dev/null | head -100
-  echo "--- changed watch files ---"
-  jq -r '.watchFiles[]' .claude/lore-state.json 2>/dev/null | while read -r wf; do
-    git diff --name-only "$LAST_SHA"..HEAD 2>/dev/null | grep -Fx "$wf" && echo "    ^ watch file changed"
-  done
-elif [ -n "$LAST_SHA" ]; then
-  echo "lastLearnedSha not reachable from current branch (rebase/squash?). Falling back to full diff vs working tree."
-  git status --short 2>/dev/null | head -50
-else
-  echo "(no lastLearnedSha — was learned outside a git repo)"
-fi
-echo
-echo "=== existing CLAUDE.md lore block ==="
-if test -f CLAUDE.md; then
-  awk '/<!-- BEGIN lore-managed/,/<!-- END lore-managed/' CLAUDE.md
-elif test -f .claude/CLAUDE.md; then
-  awk '/<!-- BEGIN lore-managed/,/<!-- END lore-managed/' .claude/CLAUDE.md
-else
-  echo "(no CLAUDE.md found — run /lore:learn first)"
-fi
-echo
-echo "=== memory dir contents ==="
-MEM="$(jq -r '.memoryDir // empty' .claude/lore-state.json 2>/dev/null)"
-[ -n "$MEM" ] && ls -1 "$MEM" 2>/dev/null || echo "(memory dir missing — refresh will recreate)"
-```
+A bundled recon script runs before you see this skill. Use its output instead of re-running its commands.
 
-## Decide what to update
+!`bash "${CLAUDE_SKILL_DIR}/scripts/recon.sh"`
 
-Read the live context above before doing anything. Three possibilities:
+## Decide which mode
 
-1. **No state file** (`NO_STATE` in the output above) → stop. Tell the user: "No lore state for this repo yet. Run `/lore:learn` first." Don't write anything.
+Look at the live output above before doing anything.
 
-2. **No drift** (zero commits since lastLearnedSha *and* zero watch files changed) → don't touch CLAUDE.md or memory files. Just bump `lastLearnedDate` in the state file (so the staleness clock resets) and tell the user "Nothing has changed since last learn." Two-sentence reply max.
+- `=== state file ===` shows `NO_STATE` → **bootstrap mode**, jump to Bootstrap below.
+- State file present, zero commits + no changed watch files → **no-op mode**, just bump `lastRefreshDate` and tell the user "Nothing has changed since the last refresh." Two sentences max.
+- State file present, drift detected → **refresh mode**, jump to Refresh below.
 
-3. **Drift detected** → proceed with phases below. Re-derive only what the change set affects:
-   - Manifest/lockfile changed → re-derive **Stack** and **Commands** sections of the CLAUDE.md block
-   - README changed → re-derive the project purpose line (if you had one)
-   - New top-level directory created → update **Layout**
-   - Many source-file changes but no manifest changes → likely no CLAUDE.md change needed; just append to `lore-history.md`
-   - `.eslintrc*`, `.prettierrc*`, `rustfmt.toml`, etc. changed → re-derive **Conventions**
+## Bootstrap mode
 
-Be precise about scope. If only `src/feature-x/foo.ts` changed, you probably don't need to touch CLAUDE.md at all. The point of refresh is to *avoid* re-reading the whole repo.
+Lightweight onboard. Aim for under 5 file reads total.
 
-## Phase 1 — Targeted reconnaissance
+1. **Stack identifiers**. From the manifest list in the recon output, pick the primary one:
+   - JS/TS: Read `package.json` → name, package manager (`packageManager` field or lockfile signal), runtime pin (`engines.node` or `.nvmrc`).
+   - Python: Read `pyproject.toml` or `requirements.txt` → project name, Python version pin.
+   - Rust: Read `Cargo.toml` → name, rust-toolchain pin.
+   - Go: Read `go.mod` → module path, go version.
+   - Other / mixed: pick the dominant manifest, do the same.
 
-Only do the reconnaissance steps relevant to what changed. Examples:
+2. **Commands**. From the same manifest, extract user-facing scripts (npm scripts, Make targets, justfile, poetry scripts). Pick at most 5 that matter: install, build, test, lint, dev/run.
 
-- If `package.json` changed: Read `package.json`, diff the `scripts` and primary deps against the existing CLAUDE.md block. Update only if the user-facing commands or stack actually changed (a new transitive dep is not a stack change).
-- If `pyproject.toml` changed: same, but for Python tooling and entry points.
-- If a new top-level dir appeared: Glob inside it once to see what's there. Update the Layout section.
-- If a CI config changed: usually no CLAUDE.md change — but worth a one-line note in `lore-history.md`.
+3. **Write the lore-managed block** at the top of CLAUDE.md.
 
-Use Read sparingly. Use Glob and Grep first.
+   - If `CLAUDE.md` exists with `<!-- BEGIN lore-managed` and `<!-- END lore-managed -->` markers: replace the content between (and including) those markers via `Edit`.
+   - If `CLAUDE.md` exists without lore markers: use `Edit` to **prepend** the new managed block (plus one blank line) at the top of the file. Leave all existing content untouched.
+   - If `CLAUDE.md` does not exist: create it with the managed block followed by a comment line `<!-- Add project-specific instructions below this line. -->` so humans know where to write.
+   - If `.claude/CLAUDE.md` exists instead of root-level `CLAUDE.md`, edit that file instead.
 
-## Phase 2 — Update the CLAUDE.md lore block
-
-Locate the existing block by its `<!-- BEGIN lore-managed` … `<!-- END lore-managed -->` markers. Use Edit (not Write) to replace only the content between (and including) those markers.
-
-When you write the new block:
-
-- Update the `last-learned:` and `last-sha:` HTML comments to today's date and the current HEAD.
-- Keep field values you didn't verify this run *if* you still believe them. The principle: changes from your reconnaissance overwrite; otherwise carry forward.
-- If the block is missing entirely (someone deleted it), do not recreate it from scratch here — tell the user to run `/lore:learn`.
-
-Hard rule: **never touch content outside the markers.** The user may have hand-edited the rest of CLAUDE.md since last learn.
-
-## Phase 3 — Update memory
-
-The memory directory is at the `memoryDir` field in the state file. Three updates, in this order:
-
-1. **`lore-history.md`** — append a new dated entry summarizing this refresh. Format:
+   Block format:
 
    ```markdown
-   ## YYYY-MM-DD — refresh
-   - From: <oldSha[:8]> → To: <newSha[:8]> (<N> commits)
-   - Changed manifests: ...
-   - CLAUDE.md updated sections: <Stack | Commands | Layout | Conventions | none>
-   - Notes: <anything you observed that doesn't belong in CLAUDE.md>
+   <!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->
+   <!-- lore-version: 0.2.0 -->
+   <!-- last-refreshed: YYYY-MM-DD -->
+   <!-- last-sha: <git head sha> -->
+
+   ## Project
+   <name>
+
+   ## Stack
+   - <language> <version pin if any>
+   - <package manager> (if relevant)
+   - <framework> (only if obvious from the manifest)
+
+   ## Commands
+   - Install: `...`
+   - Build: `...`   (omit if not applicable)
+   - Test: `...`
+   - Lint: `...`    (omit if not applicable)
+   - Dev: `...`     (omit if not applicable)
+
+   <!-- END lore-managed -->
    ```
 
-2. **`lore-architecture.md`** — only edit if architectural surface changed (new top-level package, new service, removed module). Otherwise leave alone.
+   Hard rules:
+   - Never include a section or field you couldn't confidently determine. Empty rows are worse than missing ones.
+   - Never touch content outside the markers.
+   - Block stays small. Aim for under 40 lines.
 
-3. **`lore-gotchas.md`** — only edit if you observed something specifically worth flagging (e.g., a comment in a changed file that warns "do not edit without reading X", or a TODO marked "BLOCKED:"). Don't manufacture gotchas.
+4. **Write the state file** at `.claude/lore-state.json` (create `.claude/` if needed). Schema:
 
-4. **`MEMORY.md`** — only touch if you added a brand-new topic file (then add a line to the index). Otherwise leave alone.
+   ```json
+   {
+     "version": 1,
+     "loreVersion": "0.2.0",
+     "lastRefreshSha": "<git head sha or null>",
+     "lastRefreshDate": "<ISO 8601 UTC>",
+     "repoRoot": "<git root or cwd>",
+     "repoRemote": "<git remote origin url or null>",
+     "watchFiles": [
+       "package.json", "pnpm-lock.yaml", "yarn.lock", "package-lock.json",
+       "pyproject.toml", "requirements.txt", "poetry.lock",
+       "Cargo.toml", "Cargo.lock",
+       "go.mod", "go.sum",
+       "README.md", "ARCHITECTURE.md",
+       "Dockerfile", "docker-compose.yml",
+       "Makefile", "justfile"
+     ],
+     "driftThresholds": { "commits": 20, "days": 60 }
+   }
+   ```
 
-## Phase 4 — Update the state file
+   Then ensure `.claude/lore-state.json` is gitignored. If `.gitignore` does not already cover it (or all of `.claude/`), append a section:
 
-Rewrite `.claude/lore-state.json` with:
-- `lastLearnedSha`: current HEAD (or null if not git)
-- `lastLearnedDate`: now (ISO 8601 UTC)
-- Everything else: preserved from the existing state file
+   ```
+   
+   # lore
+   .claude/lore-state.json
+   ```
 
-Use Read to load the existing JSON, then Write to overwrite with the updated version (preserving fields you didn't change, especially `repoRoot`, `repoRemote`, `memoryDir`, `watchFiles`, `driftThresholds`).
+5. **One-line summary**. Example: `Bootstrapped lore for <name> (<stack>). Wrote a managed block to CLAUDE.md and recorded the baseline at <sha[:8]>. Use /init if you want Claude Code to fill out the rest of CLAUDE.md.`
 
-## Phase 5 — Final summary
+## Refresh mode
 
-One or two sentences. State what you changed and what you left alone. Example:
+State file exists. Be conservative — keep what's still accurate, change only what the change set since `lastRefreshSha` actually affects.
 
-> Refreshed (18 commits since last learn). Updated CLAUDE.md Commands section (new `pnpm typecheck` script) and appended to lore-history. Architecture and gotchas unchanged.
+Use the recon output to see:
+- The existing lore-managed block (so you know the current values)
+- What files changed since `lastRefreshSha`
+
+Then:
+
+1. **Re-derive only what the changes could affect.**
+   - Manifest/lockfile changed → re-check Stack + Commands. Update only fields whose values actually changed.
+   - No manifest/config changes → likely nothing in the managed block needs to change. Skip to step 3.
+   - New top-level manifest appeared (e.g., monorepo grew) → consider adding a Stack line; usually safer to leave alone unless it's the new primary.
+
+2. **Update the managed block** via `Edit`, replacing the content between the existing `<!-- BEGIN lore-managed` and `<!-- END lore-managed -->` markers. Always update `last-refreshed` and `last-sha` even if no fields changed. **Never touch content outside the markers.**
+
+   If the markers are missing (someone deleted them), do not silently recreate them. Tell the user the markers were removed and ask whether to re-insert.
+
+3. **Update the state file**: bump `lastRefreshSha` to current HEAD, `lastRefreshDate` to now. Preserve all other fields. Read the existing JSON first, then write the updated version.
+
+4. **One-line summary**. Example: `Refreshed (18 commits since last refresh). Updated CLAUDE.md Commands (new "test:e2e" script). State bumped to <sha[:8]>.` If nothing in the block changed, say so: `Refreshed metadata only — managed block fields unchanged. State bumped to <sha[:8]>.`
 
 ## Edge cases
 
-- **lastLearnedSha unreachable** (rebased/squashed): fall back to comparing working-tree state against the existing CLAUDE.md block. Treat all watch files as potentially changed.
-- **Repo no longer a git repo** (e.g., user deleted `.git`): warn in the summary; refresh using mtime + content comparison only.
-- **State file references a memory dir that doesn't exist**: recreate the dir and the standard files (MEMORY.md, lore-architecture.md, lore-gotchas.md, lore-history.md), then proceed.
-- **CLAUDE.md exists but lore block is gone**: tell the user the lore block was removed; ask whether to re-insert it (don't do it automatically — they may have removed it on purpose).
+- **Not a git repo**: bootstrap works without a SHA (use `null`). Refresh falls back to date-only drift checks. The recon script handles this; you just consume its output.
+- **`lastRefreshSha` not reachable** (history rewritten): refresh in "force-rederive" mode — treat all watch files as potentially changed.
+- **CLAUDE.md is a symlink** (e.g., to AGENTS.md): if the target lives inside this repo, edit the target. If outside, write to `.claude/CLAUDE.md` instead and explain in the final summary.
 
 ## What NOT to do
 
-- Do not re-do the full Phase-1 reconnaissance from `/lore:learn`. That's wasteful.
-- Do not rewrite memory files that didn't change.
-- Do not run any commands beyond what you need for reconnaissance.
-- Do not silently change watchFiles or driftThresholds. Those are state-file fields, not part of refresh.
+- Do not run linters, tests, builds, or installers. Read scripts; do not execute them.
+- Do not commit anything.
+- Do not enlarge the managed block. Stack + Commands + metadata is the entire scope. Architecture and conventions belong below the managed block, written by the human or by Claude on demand.
+- Do not produce long reports. The file changes are the report; the chat summary is one line.

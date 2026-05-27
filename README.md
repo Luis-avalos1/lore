@@ -1,135 +1,134 @@
 # lore
 
-> Persistent repo knowledge for Claude Code. Learn a repo once, remember it forever, refresh it when things drift.
+> A staleness watchdog for `CLAUDE.md`. Tells you when your repo has drifted past what Claude Code remembers, and refreshes a small managed block so the basics stay current.
 
-`lore` is a Claude Code plugin that gets Claude oriented in a codebase without it having to grep around to rediscover the same things every session. It learns your repo, writes a managed section into `CLAUDE.md`, seeds per-project memory, and quietly watches for drift in the background.
+`lore` does one thing: it keeps the top of your `CLAUDE.md` honest. It manages a tiny block — stack identifiers, the install/build/test commands, last-refresh metadata — and pings you when too many commits or a lockfile change make that block stale. Everything else in `CLAUDE.md` stays under your control.
 
-The point isn't fewer tokens in context — `CLAUDE.md` is sent every turn, so those tokens never go away. The point is **fewer exploratory tool calls**. Claude already knows your build commands, your test runner, where the entry point lives, what your conventions look like. It doesn't have to figure it out again next session.
+## Why a watchdog, not an onboarder?
+
+Claude Code already has good built-ins for the heavy lifting:
+
+- **`/init`** generates a starting `CLAUDE.md` from scratch.
+- **Auto memory** (v2.1.59+) writes per-project notes automatically as Claude works.
+
+What it doesn't have: anything that *notices* when your `CLAUDE.md` falls out of sync with the actual repo. You bump a major dependency, add a new test runner, restructure scripts — and the file sitting at the root quietly goes stale. Claude keeps reading it as truth.
+
+That's the gap lore fills. Use `/init` to bootstrap `CLAUDE.md`, then let lore manage a small section of it and tell you when reality has moved.
 
 ## Install
 
-```sh
+```
 /plugin marketplace add Luis-avalos1/lore
 /plugin install lore@lore
 ```
 
-That's it. Restart Claude Code (or run `/reload-plugins`) and lore is live.
+Two commands, once. Reload (`/reload-plugins`) or restart Claude Code. Now `/lore:refresh` and `/lore:status` are available in every repo.
 
 ## Use it
 
-Three skills, all namespaced under `lore`:
+Two skills, plus a silent hook:
 
-| Command         | What it does                                                                          |
-| :-------------- | :------------------------------------------------------------------------------------ |
-| `/lore:learn`   | First-time onboard. Analyzes the repo, writes a managed block to `CLAUDE.md`, seeds memory files. Run this once per repo. |
-| `/lore:refresh` | Incremental update. Only re-derives what git shows changed. Cheaper than `learn`.    |
-| `/lore:status`  | Read-only inspection. Reports drift, memory inventory, last-learned date.            |
+| Command         | What it does                                                                                              |
+| :-------------- | :-------------------------------------------------------------------------------------------------------- |
+| `/lore:refresh` | First run: writes a small managed block at the top of `CLAUDE.md` (stack, commands) and records a baseline. Later runs: only re-derives what git shows changed. |
+| `/lore:status`  | Read-only. Reports last-refresh date and current drift. Won't touch anything.                             |
 
-Plus a `SessionStart` hook that runs silently in the background. It only speaks up when:
+The **SessionStart hook** runs silently every time Claude Code starts. It only prints a message when:
 
-- You're in a repo lore already knows and the repo has **drifted** (≥20 commits since last learn, a watched manifest file changed, or ≥60 days passed) → suggests `/lore:refresh`.
-- You're in a "real" repo (git, ≥10 commits, has a package manifest) that lore **hasn't seen yet** → suggests `/lore:learn`.
+- You're in a repo with a lore baseline and the repo has **drifted** — ≥20 commits since last refresh, a watched manifest (`package.json`, `Cargo.toml`, `go.mod`, lockfiles, `Makefile`, etc.) changed, ≥60 days passed, or history was rewritten. → Suggests `/lore:refresh`.
+- You're in a "real" repo (git, ≥10 commits, has a manifest) that lore **hasn't bootstrapped yet**. → Suggests `/lore:refresh` to bootstrap.
 
-In every other case it's silent. The check costs zero model tokens — it's a shell script, not a Claude call.
+In every other case the hook is silent. The check is a small shell script — zero model tokens, zero context cost when nothing fires.
 
-## What it writes
+## What the managed block looks like
 
-### `CLAUDE.md` (in your repo)
-
-A managed block at the top, between HTML comment markers. The markers are stripped before Claude reads `CLAUDE.md`, so they don't waste any context — they only exist so `/lore:refresh` knows what's safe to rewrite.
+A short block at the top of your `CLAUDE.md`, wrapped in HTML comments. Those comments are stripped before Claude reads `CLAUDE.md`, so the markers cost zero context tokens — they only exist so lore can find the block to rewrite it.
 
 ```markdown
 <!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->
-<!-- lore-version: 0.1.0 -->
-<!-- last-learned: 2026-05-27 -->
+<!-- lore-version: 0.2.0 -->
+<!-- last-refreshed: 2026-05-27 -->
 <!-- last-sha: 9a7c1d4 -->
 
-# Project: …
+## Project
+acme-api
+
 ## Stack
+- TypeScript 5.4, Node 22 (.nvmrc)
+- pnpm
+
 ## Commands
-## Layout
-## Conventions
+- Install: `pnpm install`
+- Test: `pnpm test`
+- Lint: `pnpm lint`
+- Dev: `pnpm dev`
 
 <!-- END lore-managed -->
+
+# Anything you (or `/init`) write below the markers is left alone forever.
 ```
 
-Anything you write outside those markers is left untouched. lore never deletes human-authored content.
+That's the entire scope. Architecture, conventions, prose, project-specific gotchas — those stay outside the markers, written by you or by Claude when you ask.
 
-### `.claude/lore-state.json` (in your repo, gitignored)
+## State file
 
-Tiny state file: last-learned SHA, last-learned date, watch-file list, drift thresholds. The hook reads this to decide whether to nudge.
-
-### Per-project memory
-
-Claude Code already maintains a per-repo auto-memory directory at `~/.claude/projects/<encoded-path>/memory/`. lore writes topic files there:
+lore stores a tiny state file in your repo:
 
 ```
-MEMORY.md             # index
-lore-architecture.md  # system shape, module boundaries
-lore-gotchas.md       # landmines (grows over time)
-lore-history.md       # dated log of learns/refreshes
+.claude/lore-state.json
 ```
 
-`MEMORY.md` is loaded into every session (first 200 lines). The topic files are loaded on-demand when Claude needs them.
-
-## Design notes
-
-**Why a plugin and not just a `SKILL.md` you drop into `~/.claude/skills/`?**
-Plugins are versioned, installable in one command, updatable in one command, and bundle the hook with the skills. The skills are namespaced (`/lore:learn` instead of `/learn`) so they can't conflict with anything else you have installed.
-
-**Why an HTML-comment marker block in `CLAUDE.md`?**
-HTML comments are stripped before `CLAUDE.md` is injected into Claude's context — so the markers cost zero tokens during normal use, but the Read tool still sees them, which is what `/lore:refresh` needs to find the section. Best of both worlds.
-
-**Why a hook that's silent by default?**
-Auto-running analysis on every session start would burn tokens for users who just wanted to read one file. Instead the hook does a cheap shell-only staleness check and only suggests action when the check actually fires. Zero cost when there's nothing to say.
-
-**Why memory + `CLAUDE.md`, not one or the other?**
-`CLAUDE.md` is for **facts** that every session needs (stack, commands, layout). Memory is for **history and observations** that accumulate over time (gotchas seen in past sessions, what was last refactored, decisions made). Both live alongside each other; lore writes to both during a learn/refresh.
-
-## Limitations
-
-- **Memory is per-machine.** The auto-memory directory at `~/.claude/projects/…` isn't synced. If you want history across machines, sync `~/.claude/` via your dotfiles. CLAUDE.md is in the repo so it travels naturally.
-- **Heuristic onboarding suggestion.** The hook decides "should I suggest `/lore:learn` here?" with simple rules (git repo, ≥10 commits, has a manifest). It will miss exotic project layouts. Run `/lore:learn` manually any time.
-- **Single-language detection.** The learn skill picks the primary language/manifest and works from there. Polyglot monorepos work but the generated CLAUDE.md may favor whichever workspace lore reads first.
-- **Not for ephemeral scratch repos.** The hook explicitly skips repos with <10 commits and no manifest, so scratch directories don't get nagged.
+Schema: last-refreshed SHA, last-refreshed date, the list of watched files, drift thresholds. The hook reads this to decide whether to nudge. lore adds `.claude/lore-state.json` to `.gitignore` on first run (the state is per-machine; sharing it with teammates would just cause refresh churn).
 
 ## Disable the hook
 
-If you want lore's skills but not the SessionStart suggestions:
+If you want the skills but not the SessionStart notifications:
 
 ```sh
 touch ~/.claude/lore-disabled
 ```
 
-The hook checks for this file first and exits silently if it exists. To re-enable, `rm ~/.claude/lore-disabled`.
+The hook checks this file first and exits silently if present. To re-enable, `rm ~/.claude/lore-disabled`.
 
 ## Uninstall
 
-```sh
+```
 /plugin uninstall lore@lore
 /plugin marketplace remove lore
 ```
 
-What's left behind after uninstall:
+What's left behind:
 
-- `CLAUDE.md` lore-managed block (delete by hand if you don't want it).
+- The lore-managed block in your `CLAUDE.md` (delete by hand if you don't want it).
 - `.claude/lore-state.json` (`rm` it).
-- `~/.claude/projects/<encoded>/memory/lore-*.md` (delete to free space, or keep as a personal log).
 
-lore intentionally does *not* hook into the uninstall flow to clean these up — they're your files, in your repo and your home dir.
+lore intentionally does not hook into uninstall to clean these up — they're your files.
 
-## Update
+## Limitations and honest caveats
 
-```sh
-/plugin marketplace update lore
-/plugin update lore@lore
+- **lore is small on purpose.** It does not generate architecture overviews, list files, detect conventions, or seed a memory directory. Use `/init` for the broader bootstrap; lore only manages the small block at the top.
+- **Per-machine state.** `.claude/lore-state.json` is gitignored. Each contributor maintains their own refresh cadence. The managed block in `CLAUDE.md` is committed so the *content* travels; only the staleness baseline is local.
+- **Heuristic drift thresholds.** Commits ≥20, days ≥60, or a watched-file change triggers a nudge. These are sensible defaults, not science. The thresholds are fields in the state file if you want to tune them per-repo.
+- **Platform absorption risk.** Anthropic ships memory and onboarding features quickly. A native "CLAUDE.md is stale" notification is the kind of thing Claude Code could grow on its own. If it does, the right move is to drop lore. The plugin is small enough that switching costs are nil.
+
+## Tune the thresholds
+
+Edit `.claude/lore-state.json` directly:
+
+```json
+{
+  "driftThresholds": {
+    "commits": 50,
+    "days": 90
+  }
+}
 ```
 
-Or enable auto-update in `/plugin` → Marketplaces → lore → Enable auto-update.
+The hook reads these on every session start. No reinstall needed.
 
 ## Versioning
 
-Semver against the `version` field in `plugins/lore/.claude-plugin/plugin.json`. Marketplace consumers only see a new version when that field is bumped, regardless of how many commits land in between. Release tagging is done with `claude plugin tag` from the repo.
+Semver on the `version` field in `plugins/lore/.claude-plugin/plugin.json`. Marketplace consumers see updates only when that field is bumped. Tagging is done with `claude plugin tag` from the repo.
 
 ## License
 
@@ -137,10 +136,10 @@ MIT. See [LICENSE](LICENSE).
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/Luis-avalos1/lore](https://github.com/Luis-avalos1/lore). Test changes locally with:
+Issues and PRs at [github.com/Luis-avalos1/lore](https://github.com/Luis-avalos1/lore). Test locally:
 
 ```sh
 claude --plugin-dir ./plugins/lore
 ```
 
-Then run `/reload-plugins` after edits to pick them up without restarting.
+Then `/reload-plugins` to pick up edits without restarting.
