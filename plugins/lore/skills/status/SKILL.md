@@ -26,7 +26,9 @@ If state exists, no drift:
 > Lore last refreshed <DATE> at <SHA[:8]>. No drift detected.
 
 If state exists, drift detected:
-> Lore last refreshed <DATE> at <SHA[:8]>. Drifted: <X> commits, <Y> watch files changed. Run `/lore:refresh` to catch up.
+> Lore last refreshed <DATE> at <SHA[:8]>. <X> commits, watch files changed: <list from the recon output>. Run `/lore:refresh` to catch up.
+
+If the recon output says `watch files changed: none`, write `<X> commits since last refresh, no watch-file changes` instead — that's the case where the block is probably still accurate and `/lore:refresh` is optional.
 
 Add a fourth line ONLY if something looks off (e.g., CLAUDE.md exists but the lore-managed block was removed). One sentence each.
 

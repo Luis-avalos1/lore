@@ -32,9 +32,33 @@ else
   if [ -n "$LAST_SHA" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git cat-file -e "$LAST_SHA" 2>/dev/null; then
     COMMITS=$(git rev-list --count "$LAST_SHA"..HEAD 2>/dev/null || echo 0)
     echo "commits since last refresh: $COMMITS"
+
+    # Which watched files changed? Higher-signal than raw commit count.
     if [ "${COMMITS:-0}" != "0" ]; then
-      echo "--- changed files (truncated) ---"
-      git diff --name-only "$LAST_SHA"..HEAD 2>/dev/null | head -30
+      CHANGED=$(git diff --name-only "$LAST_SHA"..HEAD 2>/dev/null || true)
+      WATCH_HITS=""
+      if [ -n "$CHANGED" ]; then
+        if command -v jq >/dev/null 2>&1; then
+          # Authoritative source: the watchFiles array in the state file.
+          while IFS= read -r wf; do
+            [ -z "$wf" ] && continue
+            if printf '%s\n' "$CHANGED" | grep -Fxq "$wf"; then
+              WATCH_HITS="$WATCH_HITS $wf"
+            fi
+          done < <(jq -r '.watchFiles[]' "$STATE" 2>/dev/null)
+        else
+          # Fallback list (matches the hook).
+          for wf in package.json pnpm-lock.yaml yarn.lock package-lock.json pyproject.toml requirements.txt poetry.lock Pipfile Cargo.toml Cargo.lock go.mod go.sum pom.xml build.gradle build.gradle.kts Gemfile composer.json mix.exs deno.json bun.lockb README.md ARCHITECTURE.md Dockerfile docker-compose.yml docker-compose.yaml Makefile justfile flake.nix; do
+            if printf '%s\n' "$CHANGED" | grep -Fxq "$wf"; then
+              WATCH_HITS="$WATCH_HITS $wf"
+            fi
+          done
+        fi
+      fi
+      WATCH_HITS=$(echo $WATCH_HITS | xargs 2>/dev/null || true)
+      echo "watch files changed: ${WATCH_HITS:-none}"
+    else
+      echo "watch files changed: none"
     fi
   elif [ -n "$LAST_SHA" ]; then
     echo "lastRefreshSha not reachable (rebase/squash). Drift cannot be computed precisely."
