@@ -1,0 +1,19 @@
+{
+  "name": "lore",
+  "version": "0.2.0",
+  "description": "A staleness watchdog for CLAUDE.md. /lore:refresh keeps a small managed block (stack, commands, version pins) synced to the current commit. A SessionStart hook silently flags drift — many commits, a lockfile change, or weeks of staleness — so you know when to refresh.",
+  "author": {
+    "name": "Luis Avalos",
+    "email": "avaloseluis@gmail.com"
+  },
+  "homepage": "https://github.com/Luis-avalos1/lore",
+  "repository": "https://github.com/Luis-avalos1/lore",
+  "license": "MIT",
+  "keywords": [
+    "onboarding",
+    "memory",
+    "claude-md",
+    "context",
+    "repo-analysis"
+  ]
+}
