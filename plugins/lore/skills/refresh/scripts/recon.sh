@@ -103,3 +103,5 @@ else
     echo "(no lore-managed block found in CLAUDE.md — may have been removed)"
   fi
 fi
+
+exit 0

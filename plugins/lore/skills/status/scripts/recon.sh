@@ -67,4 +67,7 @@ for f in CLAUDE.md .claude/CLAUDE.md; do
     fi
   fi
 done
-[ "$found_any" -eq 0 ] && echo "(no CLAUDE.md)"
+if [ "$found_any" -eq 0 ]; then
+  echo "(no CLAUDE.md)"
+fi
+exit 0
