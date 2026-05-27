@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# claude
+.claude/lore-state.json
