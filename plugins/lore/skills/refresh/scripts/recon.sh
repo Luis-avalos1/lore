@@ -59,6 +59,7 @@ if [ ! -f "$STATE" ]; then
   echo "=== bootstrap context (no state file yet) ==="
   echo
   echo "--- top-level ---"
+  # shellcheck disable=SC2012  # display-only listing, never parsed
   ls -A1 2>/dev/null | head -40
   echo
   echo "--- manifests present ---"
