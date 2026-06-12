@@ -2,104 +2,82 @@
 # lore — SessionStart hook
 #
 # Runs at session start. Stays silent unless there's something worth saying.
-# Anything printed to stdout is injected into Claude's context for this session
-# (SessionStart hooks add stdout as context — see Claude Code hooks reference).
+# Plain stdout from a SessionStart hook is surfaced in the session, so every
+# echo below is a user-facing nudge.
 #
-# This script never blocks the session: every exit is 0.
-# To silence it entirely, create the file ~/.claude/lore-disabled.
+# This script never blocks the session: every exit path is 0.
+#
+# Ways to silence it:
+#   - globally:   touch ~/.claude/lore-disabled
+#   - per repo:   touch .claude/lore-disabled
+#   - per repo:   set "disabled": true in .claude/lore-state.json
+#   - env:        LORE_DISABLE=1
+#   - per signal: set a driftThresholds value to 0 in the state file
 
 set -u
 
-# -------- escape hatch --------
-if [ -f "$HOME/.claude/lore-disabled" ]; then
-  exit 0
-fi
+[ -n "${LORE_DISABLE:-}" ] && exit 0
+[ -f "${HOME:-/nonexistent}/.claude/lore-disabled" ] && exit 0
 
-# -------- where are we --------
-CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
-STATE="$CWD/.claude/lore-state.json"
-THRESH_COMMITS=20
-THRESH_DAYS=60
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || exit 0
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh" 2>/dev/null || exit 0
+
+cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || exit 0
+[ -f .claude/lore-disabled ] && exit 0
+
+STATE=.claude/lore-state.json
 BOOTSTRAP_MIN_COMMITS=10
-
-# -------- tiny field reader (works with or without jq) --------
-get_field() {
-  local file="$1" key="$2"
-  if [ ! -f "$file" ]; then return 0; fi
-  if command -v jq >/dev/null 2>&1; then
-    jq -r --arg k "$key" '.[$k] // empty' "$file" 2>/dev/null
-  else
-    grep -E "\"$key\"[[:space:]]*:" "$file" 2>/dev/null \
-      | head -1 \
-      | sed -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/"
-  fi
-}
-
-# Portable epoch parse: tries GNU date, then BSD date.
-to_epoch() {
-  local iso="$1"
-  date -u -d "$iso" +%s 2>/dev/null \
-    || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null \
-    || echo ""
-}
-
-cd "$CWD" 2>/dev/null || exit 0
 
 # =================================================================
 # BRANCH A — state file exists: check drift, suggest /lore:refresh
 # =================================================================
 if [ -f "$STATE" ]; then
-  LAST_SHA=$(get_field "$STATE" lastRefreshSha)
-  LAST_DATE=$(get_field "$STATE" lastRefreshDate)
+  state_true "$STATE" disabled && exit 0
 
-  # If we can't read the SHA, give up silently rather than nagging.
-  if [ -z "$LAST_SHA" ]; then
+  THRESH_COMMITS=$(state_num "$STATE" commits 20)
+  THRESH_DAYS=$(state_num "$STATE" days 60)
+  LAST_SHA=$(state_str "$STATE" lastRefreshSha)
+  LAST_DATE=$(state_str "$STATE" lastRefreshDate)
+
+  # Unreadable or corrupt state: give up silently rather than nagging.
+  if [ -z "$LAST_SHA" ] && [ -z "$LAST_DATE" ]; then
     exit 0
   fi
 
-  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  REASONS=""
+  add_reason() { REASONS="${REASONS:+$REASONS; }$1"; }
 
-    # Is the last-refreshed SHA still reachable from this branch?
-    if ! git cat-file -e "$LAST_SHA" 2>/dev/null; then
-      echo "lore: history has been rewritten since the last refresh (rebase or force-push). Run /lore:refresh to recompute the baseline."
+  if [ -n "$LAST_SHA" ] && in_git_repo; then
+    if ! sha_exists "$LAST_SHA"; then
+      WHY="history was rewritten since the last refresh (rebase or force-push)"
+      is_shallow_repo && WHY="the last-refresh commit isn't present in this shallow clone"
+      echo "lore: $WHY. Run /lore:refresh to recompute the baseline."
       exit 0
     fi
 
-    COMMITS=$(git rev-list --count "$LAST_SHA"..HEAD 2>/dev/null || echo 0)
-
-    # Loud signal: many commits since last refresh.
-    if [ "${COMMITS:-0}" -ge "$THRESH_COMMITS" ]; then
-      echo "lore: $COMMITS commits since last refresh. Run /lore:refresh to update the managed block."
-      exit 0
+    COMMITS=$(count_commits "$LAST_SHA")
+    if [ "$THRESH_COMMITS" -gt 0 ] && [ "${COMMITS:-0}" -ge "$THRESH_COMMITS" ]; then
+      add_reason "$COMMITS commits"
     fi
 
-    # Even with few commits, a watched-file change is high-signal.
-    WATCH_FILES="package.json pnpm-lock.yaml yarn.lock package-lock.json pyproject.toml requirements.txt poetry.lock Pipfile Cargo.toml Cargo.lock go.mod go.sum pom.xml build.gradle build.gradle.kts Gemfile Gemfile.lock composer.json composer.lock mix.exs deno.json bun.lockb README.md ARCHITECTURE.md Dockerfile docker-compose.yml docker-compose.yaml Makefile justfile flake.nix"
-    CHANGED=$(git diff --name-only "$LAST_SHA"..HEAD 2>/dev/null || true)
-    if [ -n "$CHANGED" ]; then
-      for wf in $WATCH_FILES; do
-        if printf '%s\n' "$CHANGED" | grep -Fxq "$wf"; then
-          echo "lore: $wf changed since last refresh. Run /lore:refresh to update."
-          exit 0
-        fi
-      done
+    # Even a single commit to a watched manifest is high-signal.
+    HITS=$(changed_watch_files "$STATE" "$LAST_SHA" | head -5 | join_commas)
+    [ -n "$HITS" ] && add_reason "watched files changed: $HITS"
+  fi
+
+  # Time-based drift. Runs even without git or a SHA, so repos bootstrapped
+  # outside version control still age out.
+  if [ -n "$LAST_DATE" ] && [ "$THRESH_DAYS" -gt 0 ]; then
+    DAYS=$(days_since "$LAST_DATE")
+    if [ -n "$DAYS" ] && [ "$DAYS" -ge "$THRESH_DAYS" ]; then
+      add_reason "$DAYS days"
     fi
   fi
 
-  # Time-based drift (handles non-git repos and slow-moving repos).
-  if [ -n "$LAST_DATE" ]; then
-    NOW=$(date -u +%s)
-    THEN=$(to_epoch "$LAST_DATE")
-    if [ -n "$THEN" ]; then
-      DAYS=$(( (NOW - THEN) / 86400 ))
-      if [ "$DAYS" -ge "$THRESH_DAYS" ]; then
-        echo "lore: $DAYS days since last refresh. Run /lore:refresh to update."
-        exit 0
-      fi
-    fi
+  if [ -n "$REASONS" ]; then
+    echo "lore: drift since last refresh ($REASONS). Run /lore:refresh to update the managed block in CLAUDE.md."
   fi
-
-  # No drift worth mentioning. Silence is golden.
   exit 0
 fi
 
@@ -108,32 +86,35 @@ fi
 # Only nudge for "real" software repos to avoid nagging in scratch dirs.
 # =================================================================
 
-# Must be inside a git repo.
-command -v git >/dev/null 2>&1 || exit 0
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+in_git_repo || exit 0
 
 # Must have some history (filter out brand-new throwaway repos).
-COMMITS=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+COMMITS=$(git rev-list --count HEAD -- . 2>/dev/null || echo 0)
 if [ "${COMMITS:-0}" -lt "$BOOTSTRAP_MIN_COMMITS" ]; then
   exit 0
 fi
 
 # Must look like a software project (at least one manifest).
 HAS_MANIFEST=0
-for f in package.json pyproject.toml requirements.txt Cargo.toml go.mod pom.xml build.gradle build.gradle.kts Gemfile composer.json mix.exs deno.json Makefile; do
-  if [ -f "$f" ]; then
+while IFS= read -r f; do
+  if [ -n "$f" ] && [ -f "$f" ]; then
     HAS_MANIFEST=1
     break
   fi
-done
+done <<EOF
+$LORE_MANIFEST_FILES
+EOF
 if [ "$HAS_MANIFEST" -ne 1 ]; then
   exit 0
 fi
 
-# All conditions met: nudge once. The model decides whether to act.
-if [ -f CLAUDE.md ] || [ -f .claude/CLAUDE.md ]; then
-  echo "lore: CLAUDE.md exists but lore has no baseline for this repo. Run /lore:refresh to bootstrap a managed block."
+# All conditions met: nudge once per session. The model decides whether to act.
+CLAUDE_MD=$(find_claude_md)
+if has_lore_block "$CLAUDE_MD"; then
+  echo "lore: $CLAUDE_MD has a lore-managed block but no local baseline (fresh clone? state is per-machine). Run /lore:refresh to rebuild it, or 'touch .claude/lore-disabled' to opt this repo out."
+elif [ -n "$CLAUDE_MD" ]; then
+  echo "lore: $CLAUDE_MD exists but lore has no baseline for this repo. Run /lore:refresh to bootstrap a managed block, or 'touch .claude/lore-disabled' to opt this repo out."
 else
-  echo "lore: no CLAUDE.md yet. Consider /init to generate one, then /lore:refresh to bootstrap the managed block."
+  echo "lore: no CLAUDE.md yet. Consider /init to generate one, then /lore:refresh to add lore's managed block. (Opt out: touch .claude/lore-disabled)"
 fi
 exit 0

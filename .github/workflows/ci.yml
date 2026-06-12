@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Linux runs with GNU tools + jq present (the suite re-runs itself with
+      # jq stripped from PATH, so both parser paths are covered).
+      - name: Run test suite
+        run: bash tests/run.sh
+      # macOS system bash is 3.2 with BSD userland — the oldest environment
+      # the plugin promises to support.
+      - name: Run test suite under bash 3.2 (macOS system bash)
+        if: runner.os == 'macOS'
+        run: /bin/bash tests/run.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x --source-path=SCRIPTDIR \
+            plugins/lore/lib/common.sh \
+            plugins/lore/hooks/check-state.sh \
+            plugins/lore/skills/refresh/scripts/recon.sh \
+            plugins/lore/skills/status/scripts/recon.sh \
+            tests/run.sh
