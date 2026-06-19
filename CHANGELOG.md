@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+The "jq and the fallback finally agree" release. The sed/grep parsers used
+when `jq` is absent now match jq's JSON scoping, so a repo behaves the same
+whether or not `jq` is installed.
+
+### Fixed
+
+- **The jq-free state-file readers now respect JSON nesting.** Previously they
+  scanned the whole file, so a key nested inside another object leaked into a
+  top-level check on machines without `jq`:
+  - A `"disabled": true` (or `"watchFiles"`/`"driftThresholds"`) nested inside
+    some other object no longer registers as a top-level key, so it can't
+    silence nudges or flip the watch/threshold source.
+  - Drift thresholds are read only from `driftThresholds.<key>`; a same-named
+    key elsewhere in the file can no longer shadow them. Thresholds written as
+    quoted integers (`"50"`) now parse like bare integers, matching `jq`.
+- **`watchFiles` entries containing `,` or `]` no longer corrupt the list.**
+  The jq-free parser split on commas and stopped at the first `]`, so an entry
+  like `app/[id]/page.tsx` dropped itself and every entry after it (disabling
+  watching entirely). Entries are now read as whole quoted strings.
+- **Bare `YYYY-MM-DD` dates parse at midnight UTC on BSD/macOS.** `date -j`
+  filled the missing time-of-day from the current clock, making `days_since`
+  off by up to a day and nondeterministic; a numeric timezone offset
+  (`+05:00`/`-05:00`) is now honored instead of silently dropped.
+
+### Added
+
+- Tests covering the nested-key, shadowed-threshold, quoted-threshold, and
+  `]`-in-`watchFiles` cases (all exercised in the no-jq pass).
+
 ## 0.3.0 — 2026-06-11
 
 The "actually honor the knobs" release. The hook, the skills, and the docs

@@ -273,6 +273,55 @@ commitfile "$D" custom.cfg 'v=2'
 expect_out "hook: custom watchFiles entry fires when it changes" \
   "$HOOK" "$D" "watched files changed" "custom.cfg"
 
+# A "disabled": true nested inside another object must NOT silence nudges —
+# only a top-level "disabled" does. (Regression: the jq-free fallback matched
+# the key at any depth, disagreeing with the jq path on machines without jq.)
+D="$TMP/nested-disabled"
+mkrepo "$D"
+SHA=$(hsha "$D")
+addcommits "$D" 30
+wstate "$D" '"version": 1' '"meta": {"disabled": true}' \
+  "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$OLD_DATE\""
+expect_out "hook: a nested \"disabled\": true does not silence nudges" \
+  "$HOOK" "$D" "drift since last refresh"
+
+# A top-level key named "commits"/"days" must NOT be read as a drift threshold;
+# only driftThresholds.<key> counts. (Regression: the jq-free fallback grepped
+# the whole file for the key.)
+D="$TMP/toplevel-commits"
+mkrepo "$D"
+SHA=$(hsha "$D")
+addcommits "$D" 10
+wstate "$D" '"version": 1' '"commits": 5' \
+  "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+expect_silent "hook: a top-level \"commits\" key does not shadow the driftThresholds default" \
+  "$HOOK" "$D"
+
+# Thresholds written as quoted integers parse the same as bare integers.
+# (Regression: the jq-free fallback only matched bare digits, so quoted values
+# fell back to the default on machines without jq.)
+D="$TMP/quoted-thresh"
+mkrepo "$D"
+SHA=$(hsha "$D")
+addcommits "$D" 30
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\"" \
+  '"driftThresholds": {"commits": "50", "days": "60"}'
+expect_silent "hook: quoted-integer thresholds parse like bare integers" "$HOOK" "$D"
+
+# A watchFiles entry containing ']' (e.g. a Next.js route glob) must not
+# corrupt parsing of the rest of the list. (Regression: the jq-free fallback
+# stopped at the first ']' and dropped every following entry, which also
+# disabled watching entirely.)
+D="$TMP/bracket-watch"
+mkrepo "$D"
+commitfile "$D" package.json '{"name":"bw"}'
+SHA=$(hsha "$D")
+commitfile "$D" package.json '{"name":"bw","version":"2"}'
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\"" \
+  '"watchFiles": ["app/[id]/page.tsx", "package.json"]'
+expect_out "hook: a watchFiles entry containing ']' doesn't break the rest of the list" \
+  "$HOOK" "$D" "watched files changed" "package.json"
+
 D="$TMP/null-sha"
 mkdir -p "$D"
 wstate "$D" '"version": 1' '"lastRefreshSha": null' "\"lastRefreshDate\": \"$OLD_DATE\""

@@ -84,6 +84,17 @@ in_git_repo() {
   command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1
 }
 
+# _state_top_level FILE — print the state object's top-level members on a
+# single line with nested objects/arrays elided, so the jq-free readers below
+# can match root-level keys only (mirroring jq's top-level .key / has(.)).
+# Assumes nesting at most one level deep and that top-level string values hold
+# no braces/brackets — both true for the lore state schema (driftThresholds is
+# an object of numbers; watchFiles an array of strings; the rest are scalars).
+_state_top_level() {
+  tr -d '\n\r' <"$1" 2>/dev/null \
+    | sed -E 's/^[[:space:]]*\{//; s/\}[[:space:]]*$//; s/\{[^{}]*\}//g; s/\[[^][]*\]//g'
+}
+
 # state_str FILE KEY — print a top-level string field, or nothing if the file
 # or key is missing, or the value is null / not a string.
 state_str() {
@@ -107,7 +118,14 @@ state_num() {
     if have_jq; then
       v=$(jq -r --arg k "$key" '.driftThresholds[$k]? // empty' "$file" 2>/dev/null)
     else
-      v=$(sed -n -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$file" 2>/dev/null | head -1)
+      # Mirror the jq path's .driftThresholds[$k] scope: isolate the
+      # driftThresholds object first, then read the key inside it, so a
+      # same-named key elsewhere in the file can't shadow it. A quoted integer
+      # ("50") is accepted too, matching jq -r's string output.
+      v=$(tr -d '\n\r' <"$file" 2>/dev/null \
+        | sed -n -E 's/.*"driftThresholds"[[:space:]]*:[[:space:]]*\{([^}]*)\}.*/\1/p' \
+        | sed -n -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?.*/\1/p" \
+        | head -1)
     fi
   fi
   case "$v" in
@@ -125,7 +143,7 @@ state_has_key() {
   if have_jq; then
     [ "$(jq -r --arg k "$key" 'has($k)' "$file" 2>/dev/null)" = "true" ]
   else
-    grep -E -q "\"$key\"[[:space:]]*:" "$file" 2>/dev/null
+    _state_top_level "$file" | grep -E -q "\"$key\"[[:space:]]*:"
   fi
 }
 
@@ -136,24 +154,30 @@ state_true() {
   if have_jq; then
     [ "$(jq -r --arg k "$key" '.[$k] == true' "$file" 2>/dev/null)" = "true" ]
   else
-    grep -E -q "\"$key\"[[:space:]]*:[[:space:]]*true" "$file" 2>/dev/null
+    _state_top_level "$file" | grep -E -q "\"$key\"[[:space:]]*:[[:space:]]*true"
   fi
 }
 
 # state_watch_files FILE — print the watchFiles array, one entry per line.
 # Prints nothing when the file/array is missing (callers fall back to
-# LORE_DEFAULT_WATCH_FILES). The jq-free path assumes entries contain no
-# commas or ']' — true for every real manifest filename.
+# LORE_DEFAULT_WATCH_FILES). The jq-free path handles entries containing ','
+# or ']' (e.g. a "app/[id]/page.tsx" route glob); it assumes no entry contains
+# a literal '"' or the two-char sequence ']' followed by ',' or '}'.
 state_watch_files() {
   local file="$1"
   [ -f "$file" ] || return 0
   if have_jq; then
     jq -r '.watchFiles[]? | strings' "$file" 2>/dev/null
   else
+    # Drop everything up to the array's opening '[', then cut at its closing
+    # ']' (the one followed by ',' or '}' or end), then pull each quoted entry.
+    # Reading quoted strings directly — rather than splitting on ',' — keeps
+    # entries that themselves contain ',' or ']' intact.
     tr -d '\n\r' <"$file" 2>/dev/null \
-      | sed -n -E 's/.*"watchFiles"[[:space:]]*:[[:space:]]*\[([^]]*)\].*/\1/p' \
-      | tr ',' '\n' \
-      | sed -n -E 's/^[[:space:]]*"(.*)"[[:space:]]*$/\1/p'
+      | sed -n -E 's/.*"watchFiles"[[:space:]]*:[[:space:]]*\[//p' \
+      | sed -E 's/\][[:space:]]*[,}].*$//; s/\][[:space:]]*$//' \
+      | grep -oE '"[^"]*"' \
+      | sed -E 's/^"//; s/"$//'
   fi
 }
 
@@ -161,18 +185,34 @@ state_watch_files() {
 # seconds. Tries GNU date, then BSD date against the common layouts lore
 # writes. Prints nothing if unparseable.
 to_epoch() {
-  local iso="$1" s t fmt
+  local iso="$1" s t fmt off sign oh om adj
   [ -n "$iso" ] || return 0
   if t=$(date -u -d "$iso" +%s 2>/dev/null); then
     printf '%s\n' "$t"
     return 0
   fi
-  # BSD date: normalize away fractional seconds, zone suffixes.
-  s="${iso%%.*}"
-  s="${s%Z}"
-  s="${s%%+*}"
+  # BSD date has no -d; parse the layouts lore writes, in UTC. BSD `date -j`
+  # ignores a trailing zone offset and fills a missing time-of-day from the
+  # current clock, so normalize both by hand first to match GNU `date -d`.
+  s="${iso%%.*}"          # drop fractional seconds
+  off=""
+  case "$s" in
+    *Z) s="${s%Z}" ;;
+    *+[0-9][0-9]:[0-9][0-9]) off="${s##*+}"; s="${s%+*}" ;;
+    *-[0-9][0-9]:[0-9][0-9]) off="-${s##*-}"; s="${s%-*}" ;;
+  esac
+  case "$s" in
+    *T*|*' '*) ;;                 # already carries a time-of-day
+    *) s="${s}T00:00:00" ;;       # bare date: pin to midnight, not "now"
+  esac
   for fmt in '%Y-%m-%dT%H:%M:%S' '%Y-%m-%d %H:%M:%S' '%Y-%m-%d'; do
     if t=$(date -u -j -f "$fmt" "$s" +%s 2>/dev/null); then
+      if [ -n "$off" ]; then
+        # off is +HH:MM or -HH:MM; convert to seconds and shift to true UTC.
+        sign="${off%%[0-9]*}"; oh="${off#?}"; oh="${oh%%:*}"; om="${off##*:}"
+        adj=$(( (10#$oh * 3600) + (10#$om * 60) ))
+        if [ "$sign" = "-" ]; then t=$(( t + adj )); else t=$(( t - adj )); fi
+      fi
       printf '%s\n' "$t"
       return 0
     fi
