@@ -57,6 +57,11 @@ if [ -f "$STATE" ]; then
       is_shallow_repo && WHY="the last-refresh commit isn't present in this shallow clone"
       echo "lore: $WHY. Run /lore:refresh to recompute the baseline."
       exit 0
+    elif ! is_ancestor "$LAST_SHA"; then
+      # The baseline object still exists but diverged from HEAD's history
+      # (rebase/squash/force-push); a BASE..HEAD count would be meaningless.
+      echo "lore: the last-refresh commit is no longer on this branch's history (rebase, squash, or force-push). Run /lore:refresh to recompute the baseline."
+      exit 0
     fi
 
     COMMITS=$(count_commits "$LAST_SHA")

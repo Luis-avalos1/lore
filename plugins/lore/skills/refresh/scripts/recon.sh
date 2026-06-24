@@ -131,6 +131,9 @@ else
   elif ! sha_exists "$LAST_SHA"; then
     echo "lastRefreshSha not found in this clone (rebase, force-push, or shallow clone)."
     echo "Treat all watch files as potentially changed (force-rederive)."
+  elif ! is_ancestor "$LAST_SHA"; then
+    echo "lastRefreshSha exists but is no longer on this branch's history (rebase/squash/force-push)."
+    echo "Treat all watch files as potentially changed (force-rederive)."
   else
     echo "commits: $(count_commits "$LAST_SHA")"
     echo "--- changed watch files ---"

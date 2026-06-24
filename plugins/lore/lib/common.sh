@@ -244,11 +244,22 @@ is_shallow_repo() {
   [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]
 }
 
+# is_ancestor SHA — succeed iff SHA is an ancestor of HEAD, i.e. SHA..HEAD is a
+# meaningful "commits since" range. Fails (so callers fall back to the
+# rewritten-baseline path) when the baseline object still exists but no longer
+# sits on HEAD's history after a rebase, squash, or force-push.
+is_ancestor() {
+  git merge-base --is-ancestor "$1" HEAD 2>/dev/null
+}
+
 # count_commits BASE — commits since BASE that touch the current directory.
 # The "-- ." pathspec keeps the count meaningful when the project is a
 # subdirectory of a larger repo (monorepo package): unrelated commits
-# elsewhere in the repo don't inflate drift.
+# elsewhere in the repo don't inflate drift. Returns 0 when BASE is missing or
+# not an ancestor of HEAD, so a rewritten-but-still-present baseline can't
+# report the whole rewritten history as drift.
 count_commits() {
+  is_ancestor "$1" || { echo 0; return 0; }
   git rev-list --count "$1"..HEAD -- . 2>/dev/null || echo 0
 }
 
