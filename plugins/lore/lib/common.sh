@@ -120,12 +120,18 @@ state_num() {
     else
       # Mirror the jq path's .driftThresholds[$k] scope: isolate the
       # driftThresholds object first, then read the key inside it, so a
-      # same-named key elsewhere in the file can't shadow it. A quoted integer
-      # ("50") is accepted too, matching jq -r's string output.
+      # same-named key elsewhere in the file can't shadow it. Capture the whole
+      # raw value token (up to the next comma) rather than just a leading digit
+      # run, then trim trailing whitespace and any surrounding quotes. A
+      # non-integer like 3.5 / 1e2 / "7x" / "30 " then fails the all-digits
+      # guard below and falls back to the default — exactly as jq -r + the
+      # guard would. A quoted integer ("50") still parses as 50.
       v=$(tr -d '\n\r' <"$file" 2>/dev/null \
         | sed -n -E 's/.*"driftThresholds"[[:space:]]*:[[:space:]]*\{([^}]*)\}.*/\1/p' \
-        | sed -n -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?.*/\1/p" \
+        | sed -n -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*([^,]*).*/\1/p" \
         | head -1)
+      v="${v%"${v##*[![:space:]]}"}"          # trim trailing whitespace
+      case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; esac  # strip surrounding quotes
     fi
   fi
   case "$v" in
