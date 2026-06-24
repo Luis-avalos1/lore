@@ -62,11 +62,15 @@ else
 fi
 echo
 echo "=== claude.md ==="
+APPLY="$SCRIPT_DIR/../../../lib/apply-block.sh"
 FOUND_ANY=0
 for f in CLAUDE.md .claude/CLAUDE.md; do
   if [ -f "$f" ]; then
     FOUND_ANY=1
-    if has_lore_block "$f"; then
+    STATE=$(bash "$APPLY" status "$f" 2>/dev/null | sed -n 's/^state: //p' | head -1)
+    if [ "$STATE" = malformed ]; then
+      echo "$f: lore markers are MALFORMED (unbalanced or duplicated) — /lore:refresh force needed"
+    elif has_lore_block "$f"; then
       echo "$f: has lore-managed block"
       grep -E '^<!-- (lore-version|last-refreshed|last-sha):' "$f" 2>/dev/null
     else
