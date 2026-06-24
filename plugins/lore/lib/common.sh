@@ -191,7 +191,7 @@ state_watch_files() {
 # seconds. Tries GNU date, then BSD date against the common layouts lore
 # writes. Prints nothing if unparseable.
 to_epoch() {
-  local iso="$1" s t fmt off sign oh om adj
+  local iso="$1" s t fmt off sign oh om adj frac
   [ -n "$iso" ] || return 0
   if t=$(date -u -d "$iso" +%s 2>/dev/null); then
     printf '%s\n' "$t"
@@ -200,7 +200,12 @@ to_epoch() {
   # BSD date has no -d; parse the layouts lore writes, in UTC. BSD `date -j`
   # ignores a trailing zone offset and fills a missing time-of-day from the
   # current clock, so normalize both by hand first to match GNU `date -d`.
-  s="${iso%%.*}"          # drop fractional seconds
+  # Drop fractional seconds only, keeping any trailing Z or numeric offset — a
+  # blunt "${iso%%.*}" would also delete a +05:00 offset that follows the dot.
+  case "$iso" in
+    *.*) s="${iso%%.*}"; frac="${iso#*.}"; s="$s${frac#"${frac%%[!0-9]*}"}" ;;
+    *)   s="$iso" ;;
+  esac
   off=""
   case "$s" in
     *Z) s="${s%Z}" ;;
