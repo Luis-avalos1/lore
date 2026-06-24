@@ -39,13 +39,15 @@ else
   LAST_DATE=$(state_str "$STATE" lastRefreshDate)
 
   if [ -n "$LAST_SHA" ] && in_git_repo; then
-    if sha_exists "$LAST_SHA"; then
+    if sha_exists "$LAST_SHA" && is_ancestor "$LAST_SHA"; then
       COMMITS=$(count_commits "$LAST_SHA")
       echo "commits since last refresh: $COMMITS"
       HITS=$(changed_watch_files "$STATE" "$LAST_SHA" | join_commas)
       echo "watch files changed: ${HITS:-none}"
     elif is_shallow_repo; then
       echo "lastRefreshSha not present in this shallow clone. Drift cannot be computed precisely."
+    elif sha_exists "$LAST_SHA"; then
+      echo "lastRefreshSha is no longer on this branch's history (rebase/squash/force-push). Drift cannot be computed precisely."
     else
       echo "lastRefreshSha not reachable (rebase/squash). Drift cannot be computed precisely."
     fi
@@ -62,11 +64,15 @@ else
 fi
 echo
 echo "=== claude.md ==="
+APPLY="$SCRIPT_DIR/../../../lib/apply-block.sh"
 FOUND_ANY=0
 for f in CLAUDE.md .claude/CLAUDE.md; do
   if [ -f "$f" ]; then
     FOUND_ANY=1
-    if has_lore_block "$f"; then
+    STATE=$(bash "$APPLY" status "$f" 2>/dev/null | sed -n 's/^state: //p' | head -1)
+    if [ "$STATE" = malformed ]; then
+      echo "$f: lore markers are MALFORMED (unbalanced or duplicated) — /lore:refresh force needed"
+    elif has_lore_block "$f"; then
       echo "$f: has lore-managed block"
       grep -E '^<!-- (lore-version|last-refreshed|last-sha):' "$f" 2>/dev/null
     else

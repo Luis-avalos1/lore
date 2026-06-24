@@ -476,6 +476,222 @@ expect_out "status recon: date-only drift outside git" \
   "$STATUS_RECON" "$D" "date only" "days since last refresh"
 
 # =================================================================
+# apply-block: deterministic managed-block writer (golden bytes)
+# =================================================================
+
+AB="$ROOT/plugins/lore/lib/apply-block.sh"
+AB_BEGIN='<!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->'
+AB_END='<!-- END lore-managed -->'
+AB_BODY='<!-- lore-version: 0.0.0 -->
+## Project
+demo'
+
+# ab_apply TARGET BODY — apply BODY to TARGET; capture stdout+stderr/exit.
+ab_apply() { OUT=$(printf '%s' "$2" | "$BASH" "$AB" apply "$1" 2>&1); RC=$?; }
+# ab_status TARGET — run status; capture stdout.
+ab_status() { OUT=$("$BASH" "$AB" status "$1" 2>&1); RC=$?; }
+
+t_start "apply-block: create writes exactly one block plus a human trailer"
+D="$TMP/ab-create"; mkdir -p "$D"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if [ "$RC" -eq 0 ] && [ "$(grep -c 'BEGIN lore-managed' "$D/CLAUDE.md")" -eq 1 ] \
+  && [ "$(grep -c 'END lore-managed' "$D/CLAUDE.md")" -eq 1 ] \
+  && grep -q 'Add project-specific instructions' "$D/CLAUDE.md"; then t_pass
+else t_fail "create" "$(cat "$D/CLAUDE.md" 2>&1)"; fi
+
+t_start "apply-block: a second identical apply is byte-for-byte identical"
+cp "$D/CLAUDE.md" "$D/first"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if cmp -s "$D/first" "$D/CLAUDE.md"; then t_pass; else t_fail "not idempotent" "$(cat "$D/CLAUDE.md")"; fi
+
+t_start "apply-block: replace yields exact golden bytes (LF), outside markers intact"
+D="$TMP/ab-lf"; mkdir -p "$D"
+printf 'HEAD A\nHEAD B\n%s\nOLD BODY\n%s\nTAIL A\nTAIL B\n' "$AB_BEGIN" "$AB_END" >"$D/CLAUDE.md"
+{ printf 'HEAD A\nHEAD B\n'; printf '%s\n' "$AB_BEGIN"; printf '%s\n' "$AB_BODY"; printf '%s\n' "$AB_END"; printf 'TAIL A\nTAIL B\n'; } >"$D/want"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if cmp -s "$D/CLAUDE.md" "$D/want"; then t_pass; else t_fail "golden LF mismatch" "$(cat "$D/CLAUDE.md")"; fi
+
+t_start "apply-block: replace preserves CRLF line endings (golden bytes)"
+D="$TMP/ab-crlf"; mkdir -p "$D"
+printf 'HEAD A\r\n%s\r\nOLD\r\n%s\r\nTAIL\r\n' "$AB_BEGIN" "$AB_END" >"$D/CLAUDE.md"
+{ printf 'HEAD A\r\n'; printf '%s\r\n' "$AB_BEGIN"; printf '<!-- lore-version: 0.0.0 -->\r\n## Project\r\ndemo\r\n'; printf '%s\r\n' "$AB_END"; printf 'TAIL\r\n'; } >"$D/want"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if cmp -s "$D/CLAUDE.md" "$D/want"; then t_pass; else t_fail "golden CRLF mismatch" "$(cat -v "$D/CLAUDE.md")"; fi
+
+t_start "apply-block: replace keeps a missing trailing newline at EOF"
+D="$TMP/ab-nonl"; mkdir -p "$D"
+printf 'PRE\n%s\nOLD\n%s' "$AB_BEGIN" "$AB_END" >"$D/CLAUDE.md"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if [ -n "$(tail -c1 "$D/CLAUDE.md")" ]; then t_pass; else t_fail "added a trailing newline"; fi
+
+t_start "apply-block: replace keeps a present trailing newline at EOF"
+D="$TMP/ab-nl"; mkdir -p "$D"
+printf 'PRE\n%s\nOLD\n%s\n' "$AB_BEGIN" "$AB_END" >"$D/CLAUDE.md"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if [ -z "$(tail -c1 "$D/CLAUDE.md")" ]; then t_pass; else t_fail "dropped the trailing newline"; fi
+
+t_start "apply-block: insert prepends a block and preserves original bytes"
+D="$TMP/ab-insert"; mkdir -p "$D"
+printf '# Notes\n\nbody line\nno newline at end' >"$D/CLAUDE.md"
+cp "$D/CLAUDE.md" "$D/orig"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+osz=$(wc -c <"$D/orig" | tr -d ' ')
+if [ "$(grep -c 'BEGIN lore-managed' "$D/CLAUDE.md")" -eq 1 ] && tail -c "$osz" "$D/CLAUDE.md" | cmp -s - "$D/orig"; then t_pass
+else t_fail "insert clobbered original" "$(cat "$D/CLAUDE.md")"; fi
+
+t_start "apply-block: refuses two blocks (exit 3) and leaves the file untouched"
+D="$TMP/ab-two"; mkdir -p "$D"
+printf '%s\na\n%s\nMID HUMAN\n%s\nb\n%s\n' "$AB_BEGIN" "$AB_END" "$AB_BEGIN" "$AB_END" >"$D/CLAUDE.md"
+cp "$D/CLAUDE.md" "$D/orig"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if [ "$RC" -eq 3 ] && cmp -s "$D/orig" "$D/CLAUDE.md"; then t_pass; else t_fail "two blocks not refused (rc=$RC)" "$OUT"; fi
+
+t_start "apply-block: refuses a BEGIN with no END (exit 3), file untouched"
+D="$TMP/ab-open"; mkdir -p "$D"
+printf 'PRE\n%s\nx\nhuman content past a missing END\n' "$AB_BEGIN" >"$D/CLAUDE.md"
+cp "$D/CLAUDE.md" "$D/orig"
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if [ "$RC" -eq 3 ] && cmp -s "$D/orig" "$D/CLAUDE.md"; then t_pass; else t_fail "open block not refused (rc=$RC)" "$OUT"; fi
+
+t_start "apply-block: rejects a body that itself contains markers (exit 3)"
+D="$TMP/ab-bodymark"; mkdir -p "$D"
+ab_apply "$D/CLAUDE.md" "x
+$AB_END"
+if [ "$RC" -eq 3 ]; then t_pass; else t_fail "body markers not rejected (rc=$RC)" "$OUT"; fi
+
+t_start "apply-block: status reports replace with the block line range"
+D="$TMP/ab-st"; mkdir -p "$D"
+printf 'PRE\n%s\nx\n%s\n' "$AB_BEGIN" "$AB_END" >"$D/CLAUDE.md"
+ab_status "$D/CLAUDE.md"
+case "$OUT" in *"state: replace"*"block: 2-4"*) t_pass ;; *) t_fail "status replace" "$OUT" ;; esac
+
+t_start "apply-block: status reports malformed for two blocks"
+ab_status "$TMP/ab-two/CLAUDE.md"
+case "$OUT" in *"state: malformed"*) t_pass ;; *) t_fail "status malformed" "$OUT" ;; esac
+
+t_start "apply-block: status reports create (missing) and insert (no markers)"
+ab_status "$TMP/ab-missing.md"; S1="$OUT"
+printf 'just notes\n' >"$TMP/ab-plain.md"; ab_status "$TMP/ab-plain.md"; S2="$OUT"
+case "$S1|$S2" in *"state: create"*"state: insert"*) t_pass ;; *) t_fail "status create/insert" "$S1 || $S2" ;; esac
+
+t_start "apply-block: writes through a symlinked CLAUDE.md, keeping the symlink"
+D="$TMP/ab-link"; mkdir -p "$D"
+printf '# Real top\n%s\nold\n%s\nbottom\n' "$AB_BEGIN" "$AB_END" >"$D/AGENTS.md"
+( cd "$D" && ln -s AGENTS.md CLAUDE.md )
+ab_apply "$D/CLAUDE.md" "$AB_BODY"
+if [ -L "$D/CLAUDE.md" ] && grep -q '## Project' "$D/AGENTS.md" && grep -q '# Real top' "$D/AGENTS.md"; then t_pass
+else t_fail "symlink write-through" "$(ls -l "$D"; cat "$D/AGENTS.md")"; fi
+
+# =================================================================
+# Hook: threshold boundaries (commits, days, bootstrap minimum)
+# =================================================================
+
+# days_ago_iso N — ISO-8601 UTC timestamp N days ago (GNU date, then BSD date).
+days_ago_iso() {
+  date -u -d "-$1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -v-"$1"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+D="$TMP/commit-19"; mkrepo "$D"; SHA=$(hsha "$D"); addcommits "$D" 19
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+expect_silent "hook: silent at 19 commits (one below the default threshold)" "$HOOK" "$D"
+
+D="$TMP/commit-21"; mkrepo "$D"; SHA=$(hsha "$D"); addcommits "$D" 21
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+expect_out "hook: fires at 21 commits (just above the default threshold)" "$HOOK" "$D" "21 commits"
+
+D="$TMP/day-9"; mkrepo "$D"
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$(hsha "$D")\"" "\"lastRefreshDate\": \"$(days_ago_iso 9)\"" \
+  '"driftThresholds": {"commits": 0, "days": 10}'
+expect_silent "hook: silent at 9 days (one below a custom day threshold)" "$HOOK" "$D"
+
+D="$TMP/day-10"; mkrepo "$D"
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$(hsha "$D")\"" "\"lastRefreshDate\": \"$(days_ago_iso 10)\"" \
+  '"driftThresholds": {"commits": 0, "days": 10}'
+expect_out "hook: fires at 10 days (at a custom day threshold)" "$HOOK" "$D" "10 days"
+
+D="$TMP/boot-9c"; mkrepo "$D"; commitfile "$D" package.json '{"name":"b"}'; addcommits "$D" 7
+expect_silent "hook: no bootstrap nudge at 9 commits (below the minimum of 10)" "$HOOK" "$D"
+
+D="$TMP/boot-10c"; mkrepo "$D"; commitfile "$D" package.json '{"name":"b"}'; addcommits "$D" 8
+expect_out "hook: bootstrap nudge at exactly 10 commits" "$HOOK" "$D" "/lore:refresh"
+
+# =================================================================
+# Hook + recon: git edge cases (shallow, detached, diverged baseline)
+# =================================================================
+
+ORIGIN="$TMP/sh-origin"; mkrepo "$ORIGIN"; OLDSHA=$(hsha "$ORIGIN"); addcommits "$ORIGIN" 5
+SHALLOW="$TMP/sh-clone"
+if git clone -q --depth 1 "file://$ORIGIN" "$SHALLOW" 2>/dev/null; then
+  wstate "$SHALLOW" '"version": 1' "\"lastRefreshSha\": \"$OLDSHA\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+  expect_out "hook: a shallow clone missing the baseline says 'shallow clone'" "$HOOK" "$SHALLOW" "shallow clone"
+else
+  t_start "hook: a shallow clone missing the baseline says 'shallow clone'"; t_fail "git clone --depth 1 file:// failed"
+fi
+
+D="$TMP/detached"; mkrepo "$D"; SHA=$(hsha "$D"); addcommits "$D" 25
+( cd "$D" && git checkout -q --detach )
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+expect_out "hook: detached HEAD still computes commit drift" "$HOOK" "$D" "25 commits"
+expect_out "refresh recon: reports 'branch: HEAD' under detached HEAD" "$REFRESH_RECON" "$D" "branch: HEAD"
+
+D="$TMP/diverged"; mkrepo "$D"; BR=$(git -C "$D" rev-parse --abbrev-ref HEAD)
+( cd "$D" && git checkout -q -b side && echo s >side.txt && git add -A && git commit -qm side )
+SIDE=$(hsha "$D")
+( cd "$D" && git checkout -q "$BR" && echo m >main.txt && git add -A && git commit -qm main )
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SIDE\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+expect_out "hook: a baseline no longer on HEAD's history asks to recompute" "$HOOK" "$D" "no longer on this branch"
+expect_not_out "hook: a diverged baseline does not emit a bogus commit-count line" "$HOOK" "$D" "drift since last refresh"
+
+# =================================================================
+# Hook: non-integer thresholds fall back to defaults (jq/no-jq parity)
+# =================================================================
+
+D="$TMP/float-thresh"; mkrepo "$D"; SHA=$(hsha "$D"); addcommits "$D" 10
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\"" \
+  '"driftThresholds": {"commits": 3.5, "days": 60}'
+expect_silent "hook: a non-integer commit threshold (3.5) falls back to default 20, not 3" "$HOOK" "$D"
+
+D="$TMP/garbage-days"; mkrepo "$D"
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$(hsha "$D")\"" "\"lastRefreshDate\": \"$(days_ago_iso 30)\"" \
+  '"driftThresholds": {"commits": 0, "days": "7x"}'
+expect_silent "hook: a quoted-garbage day threshold (\"7x\") falls back to default 60, not 7" "$HOOK" "$D"
+
+# =================================================================
+# CRLF CLAUDE.md + recon context blocks
+# =================================================================
+
+D="$TMP/crlf-md"; mkrepo "$D"; commitfile "$D" package.json '{"name":"c"}'; addcommits "$D" 11
+printf '<!-- BEGIN lore-managed: x -->\r\n<!-- lore-version: 0.0.0 -->\r\n## Project\r\nx\r\n<!-- END lore-managed -->\r\nnotes\r\n' >"$D/CLAUDE.md"
+expect_out "hook: detects a lore block in a CRLF CLAUDE.md (fresh-clone nudge)" "$HOOK" "$D" "fresh clone"
+
+D="$TMP/recon-dirty"; mkrepo "$D"; commitfile "$D" package.json '{"name":"d"}'
+echo "uncommitted change" >"$D/dirty.txt"
+expect_out "refresh recon: surfaces uncommitted working-tree changes" "$REFRESH_RECON" "$D" "uncommitted changes"
+
+D="$TMP/recon-nongit"; mkdir -p "$D"; echo '{"name":"x"}' >"$D/package.json"
+expect_out "refresh recon: reports a non-git project" "$REFRESH_RECON" "$D" "not a git repo"
+
+D="$TMP/recon-make"; mkrepo "$D"
+printf 'build:\n\techo b\ntest:\n\techo t\n' >"$D/Makefile"
+( cd "$D" && git add -A && git commit -qm mk )
+expect_out "refresh recon: lists Makefile targets in bootstrap context" "$REFRESH_RECON" "$D" "Makefile targets"
+
+# Meta-test (no-jq pass only): the shim must cover every external tool the
+# scripts and this suite invoke, and must exclude jq — otherwise the fallback
+# pass could silently skip coverage when a script swallows a missing-tool error.
+if [ -n "${LORE_TEST_NOJQ:-}" ]; then
+  t_start "no-jq shim covers every command the scripts use (and excludes jq)"
+  MISS=""
+  for tool in git date grep sed awk head tail tr sort wc cat printf cut \
+    dirname basename mktemp rm mkdir cp mv chmod ln readlink stat cmp; do
+    command -v "$tool" >/dev/null 2>&1 || MISS="$MISS $tool"
+  done
+  command -v jq >/dev/null 2>&1 && MISS="$MISS jq(should-be-absent)"
+  if [ -z "$MISS" ]; then t_pass; else t_fail "shim gaps:$MISS"; fi
+fi
+
+# =================================================================
 # Summary + no-jq re-run
 # =================================================================
 
@@ -491,9 +707,13 @@ fi
 if [ -z "${LORE_TEST_NOJQ:-}" ] && command -v jq >/dev/null 2>&1; then
   SHIM="$TMP/nojq-bin"
   mkdir -p "$SHIM"
+  # Every external command the plugin scripts AND this suite invoke, minus jq.
+  # Keep in sync when a script gains a new tool dependency: the meta-test below
+  # ("no-jq shim covers every command the scripts use") fails CI if one is
+  # missing, so the no-jq pass can't silently skip coverage.
   for t in sh env git date grep sed awk head tail tr sort wc ls cat printf \
     dirname basename mktemp rm rmdir mkdir cp mv touch xargs uname find \
-    cut paste chmod ln true false id; do
+    cut paste chmod ln readlink stat cmp true false id; do
     p=$(command -v "$t" 2>/dev/null) && ln -s "$p" "$SHIM/$t" 2>/dev/null
   done
   ln -sf "$BASH" "$SHIM/bash"

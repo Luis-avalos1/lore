@@ -49,7 +49,7 @@ A short block at the top of your `CLAUDE.md`, wrapped in HTML comments. The mark
 
 ```markdown
 <!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->
-<!-- lore-version: 0.3.0 -->
+<!-- lore-version: 0.4.0 -->
 <!-- last-refreshed: 2026-06-11 -->
 <!-- last-sha: 9a7c1d4e22b1 -->
 
@@ -73,6 +73,18 @@ acme-api
 
 That's the entire scope. Architecture, conventions, prose, project-specific gotchas — those stay outside the markers, written by you or by Claude when you ask.
 
+## The managed-block contract
+
+Editing your `CLAUDE.md` is the one thing lore must never get wrong, so the splice is done by a small deterministic script ([`lib/apply-block.sh`](plugins/lore/lib/apply-block.sh)), not by the model. The model derives the few lines of block *body*; the script owns the markers and guarantees:
+
+- **Only the bytes between the markers change.** Everything outside — your prose, blank lines, the file's line endings (LF or CRLF), and its trailing-newline state — is preserved byte-for-byte.
+- **The write is atomic.** lore writes a temp file and renames it over your `CLAUDE.md`, so an interrupted run can't leave a half-written file.
+- **It's idempotent.** Refreshing twice with the same inputs yields identical bytes, never a duplicate block.
+- **It refuses ambiguous files.** If the markers are missing one side, duplicated, or out of order, lore stops and tells you rather than guessing where your content ends. `/lore:status` flags the same condition.
+- **It follows a symlinked `CLAUDE.md`** (e.g. to `AGENTS.md`) and edits the target in place, keeping the symlink.
+
+Because of `disable-model-invocation`, `/lore:refresh` only runs when **you** invoke it. The SessionStart hook never edits anything — it just prints a one-line nudge so you can decide to refresh.
+
 ## State file
 
 lore stores a tiny state file in your repo:
@@ -86,7 +98,7 @@ It records the last-refresh SHA and date. lore adds it to `.gitignore` on first 
 ```json
 {
   "version": 1,
-  "loreVersion": "0.3.0",
+  "loreVersion": "0.4.0",
   "lastRefreshSha": "9a7c1d4e22b1…",
   "lastRefreshDate": "2026-06-11T18:04:05Z",
   "repoRoot": "/path/to/repo",
@@ -151,14 +163,16 @@ Semver on the `version` field in `plugins/lore/.claude-plugin/plugin.json`. Mark
 
 ## Development
 
-The hook and recon scripts are plain bash (3.2-compatible — stock macOS — with BSD and GNU userlands both supported; `jq` is used when present, never required). A dependency-free test suite covers drift detection, the disable switches, custom thresholds/watch lists, monorepo subdirectory projects, and the jq-free fallback parsers:
+The hook, the shared library, the block writer, and the recon scripts are plain bash (3.2-compatible — stock macOS — with BSD and GNU userlands both supported; `jq` is used when present, never required). A dependency-free test suite covers the managed-block writer (golden byte comparisons for create/replace/insert, idempotency, CRLF, malformed-marker refusal, symlinks), drift detection and its threshold boundaries, the disable switches, custom thresholds/watch lists, monorepo and git edge cases (shallow clone, detached HEAD, rewritten history), and the jq-free fallback parsers — the whole suite re-runs with `jq` stripped from `PATH` so both parser paths are covered:
 
 ```sh
-bash tests/run.sh        # or /bin/bash tests/run.sh for the bash-3.2 experience
-claude plugin validate . # manifest + skill frontmatter validation
+make test          # bash tests/run.sh — or /bin/bash tests/run.sh for the bash-3.2 path
+make validate      # claude plugin validate (plugin + marketplace, --strict)
+make shellcheck    # lint every shipped script
+make check         # all of the above
 ```
 
-CI runs the suite on Linux and macOS plus shellcheck. Test a working copy of the plugin against a real repo with:
+CI runs the suite on Linux and macOS (system bash 3.2), plus shellcheck and `claude plugin validate`. Test a working copy of the plugin against a real repo with:
 
 ```sh
 claude --plugin-dir ./plugins/lore

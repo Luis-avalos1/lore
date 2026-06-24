@@ -120,12 +120,18 @@ state_num() {
     else
       # Mirror the jq path's .driftThresholds[$k] scope: isolate the
       # driftThresholds object first, then read the key inside it, so a
-      # same-named key elsewhere in the file can't shadow it. A quoted integer
-      # ("50") is accepted too, matching jq -r's string output.
+      # same-named key elsewhere in the file can't shadow it. Capture the whole
+      # raw value token (up to the next comma) rather than just a leading digit
+      # run, then trim trailing whitespace and any surrounding quotes. A
+      # non-integer like 3.5 / 1e2 / "7x" / "30 " then fails the all-digits
+      # guard below and falls back to the default — exactly as jq -r + the
+      # guard would. A quoted integer ("50") still parses as 50.
       v=$(tr -d '\n\r' <"$file" 2>/dev/null \
         | sed -n -E 's/.*"driftThresholds"[[:space:]]*:[[:space:]]*\{([^}]*)\}.*/\1/p' \
-        | sed -n -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?.*/\1/p" \
+        | sed -n -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*([^,]*).*/\1/p" \
         | head -1)
+      v="${v%"${v##*[![:space:]]}"}"          # trim trailing whitespace
+      case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; esac  # strip surrounding quotes
     fi
   fi
   case "$v" in
@@ -185,7 +191,7 @@ state_watch_files() {
 # seconds. Tries GNU date, then BSD date against the common layouts lore
 # writes. Prints nothing if unparseable.
 to_epoch() {
-  local iso="$1" s t fmt off sign oh om adj
+  local iso="$1" s t fmt off sign oh om adj frac
   [ -n "$iso" ] || return 0
   if t=$(date -u -d "$iso" +%s 2>/dev/null); then
     printf '%s\n' "$t"
@@ -194,7 +200,12 @@ to_epoch() {
   # BSD date has no -d; parse the layouts lore writes, in UTC. BSD `date -j`
   # ignores a trailing zone offset and fills a missing time-of-day from the
   # current clock, so normalize both by hand first to match GNU `date -d`.
-  s="${iso%%.*}"          # drop fractional seconds
+  # Drop fractional seconds only, keeping any trailing Z or numeric offset — a
+  # blunt "${iso%%.*}" would also delete a +05:00 offset that follows the dot.
+  case "$iso" in
+    *.*) s="${iso%%.*}"; frac="${iso#*.}"; s="$s${frac#"${frac%%[!0-9]*}"}" ;;
+    *)   s="$iso" ;;
+  esac
   off=""
   case "$s" in
     *Z) s="${s%Z}" ;;
@@ -238,11 +249,22 @@ is_shallow_repo() {
   [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]
 }
 
+# is_ancestor SHA — succeed iff SHA is an ancestor of HEAD, i.e. SHA..HEAD is a
+# meaningful "commits since" range. Fails (so callers fall back to the
+# rewritten-baseline path) when the baseline object still exists but no longer
+# sits on HEAD's history after a rebase, squash, or force-push.
+is_ancestor() {
+  git merge-base --is-ancestor "$1" HEAD 2>/dev/null
+}
+
 # count_commits BASE — commits since BASE that touch the current directory.
 # The "-- ." pathspec keeps the count meaningful when the project is a
 # subdirectory of a larger repo (monorepo package): unrelated commits
-# elsewhere in the repo don't inflate drift.
+# elsewhere in the repo don't inflate drift. Returns 0 when BASE is missing or
+# not an ancestor of HEAD, so a rewritten-but-still-present baseline can't
+# report the whole rewritten history as drift.
 count_commits() {
+  is_ancestor "$1" || { echo 0; return 0; }
   git rev-list --count "$1"..HEAD -- . 2>/dev/null || echo 0
 }
 

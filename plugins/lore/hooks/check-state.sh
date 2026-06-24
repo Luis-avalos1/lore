@@ -2,8 +2,11 @@
 # lore — SessionStart hook
 #
 # Runs at session start. Stays silent unless there's something worth saying.
-# Plain stdout from a SessionStart hook is surfaced in the session, so every
-# echo below is a user-facing nudge.
+# Plain stdout from a SessionStart hook is added to Claude's context (the model
+# reads it and surfaces it to the user), so every echo below is a drift nudge.
+# /lore:refresh is user-invocable only (disable-model-invocation), so the nudge
+# prompts the user to refresh rather than letting Claude rewrite CLAUDE.md on
+# its own.
 #
 # This script never blocks the session: every exit path is 0.
 #
@@ -53,6 +56,11 @@ if [ -f "$STATE" ]; then
       WHY="history was rewritten since the last refresh (rebase or force-push)"
       is_shallow_repo && WHY="the last-refresh commit isn't present in this shallow clone"
       echo "lore: $WHY. Run /lore:refresh to recompute the baseline."
+      exit 0
+    elif ! is_ancestor "$LAST_SHA"; then
+      # The baseline object still exists but diverged from HEAD's history
+      # (rebase/squash/force-push); a BASE..HEAD count would be meaningless.
+      echo "lore: the last-refresh commit is no longer on this branch's history (rebase, squash, or force-push). Run /lore:refresh to recompute the baseline."
       exit 0
     fi
 

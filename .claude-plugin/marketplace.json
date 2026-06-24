@@ -10,7 +10,7 @@
     {
       "name": "lore",
       "source": "./plugins/lore",
-      "description": "A staleness watchdog for CLAUDE.md. /lore:refresh keeps a small managed block (stack + commands + version pins) synced to the current commit. A SessionStart hook silently flags drift so you know when to refresh.",
+      "description": "A staleness watchdog for CLAUDE.md. /lore:refresh keeps a small managed block (stack, commands, version pins) synced to the current commit. A SessionStart hook silently flags drift — many commits, a lockfile change, or weeks of staleness — so you know when to refresh.",
       "keywords": [
         "claude-md",
         "drift-detection",

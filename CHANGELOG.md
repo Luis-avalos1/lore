@@ -1,35 +1,73 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
-The "jq and the fallback finally agree" release. The sed/grep parsers used
-when `jq` is absent now match jq's JSON scoping, so a repo behaves the same
-whether or not `jq` is installed.
-
-### Fixed
-
-- **The jq-free state-file readers now respect JSON nesting.** Previously they
-  scanned the whole file, so a key nested inside another object leaked into a
-  top-level check on machines without `jq`:
-  - A `"disabled": true` (or `"watchFiles"`/`"driftThresholds"`) nested inside
-    some other object no longer registers as a top-level key, so it can't
-    silence nudges or flip the watch/threshold source.
-  - Drift thresholds are read only from `driftThresholds.<key>`; a same-named
-    key elsewhere in the file can no longer shadow them. Thresholds written as
-    quoted integers (`"50"`) now parse like bare integers, matching `jq`.
-- **`watchFiles` entries containing `,` or `]` no longer corrupt the list.**
-  The jq-free parser split on commas and stopped at the first `]`, so an entry
-  like `app/[id]/page.tsx` dropped itself and every entry after it (disabling
-  watching entirely). Entries are now read as whole quoted strings.
-- **Bare `YYYY-MM-DD` dates parse at midnight UTC on BSD/macOS.** `date -j`
-  filled the missing time-of-day from the current clock, making `days_since`
-  off by up to a day and nondeterministic; a numeric timezone offset
-  (`+05:00`/`-05:00`) is now honored instead of silently dropped.
+The "never corrupt your CLAUDE.md" release. The managed-block edit is now done
+by a deterministic, byte-preserving writer instead of model prose, refresh is
+user-triggered only, and the test suite grew golden byte comparisons plus
+threshold-boundary and git-edge coverage.
 
 ### Added
 
-- Tests covering the nested-key, shadowed-threshold, quoted-threshold, and
-  `]`-in-`watchFiles` cases (all exercised in the no-jq pass).
+- **`lib/apply-block.sh` — a deterministic managed-block writer.** It owns the
+  `BEGIN`/`END` markers and performs an atomic, marker-bounded splice: only the
+  bytes between the markers change, everything outside is preserved byte-for-byte
+  (text, blank lines, LF/CRLF, trailing-newline state), and the write is atomic
+  (temp file + rename). It refuses to write on unbalanced or duplicate markers
+  (exit 3, nothing written), follows a symlinked `CLAUDE.md` to its target, and
+  is idempotent. `/lore:refresh` now derives only the block body and pipes it to
+  this writer instead of hand-editing the file.
+- **Golden byte-comparison tests** for the writer (create/insert/replace,
+  idempotency, exact LF and CRLF output, trailing-newline preservation, two-block
+  and missing-`END` refusal, body-with-markers rejection, symlink write-through),
+  plus threshold-boundary tests (commits 19/21, day 9/10, bootstrap 9/10) and git
+  edge cases (shallow clone, detached HEAD, rewritten-but-present baseline). The
+  suite grew from 35 to 66 tests, all re-run with `jq` removed.
+- CI now runs `claude plugin validate --strict`, shellchecks the writer, and a
+  `Makefile` provides `make test|validate|shellcheck|check`.
+- `$schema` on `plugin.json` for editor validation.
+
+### Changed
+
+- **`/lore:refresh` is user-invocable only** (`disable-model-invocation: true`),
+  so Claude can no longer autonomously rewrite `CLAUDE.md` at session start — the
+  SessionStart hook prompts *you* to refresh. `/lore:status` stays
+  model-invocable (it's read-only). This also drops the refresh description from
+  always-on context.
+- The recon scripts report a deterministic marker `state:`
+  (`create`/`insert`/`replace`/`malformed`) from the writer instead of dumping an
+  open-ended `awk` range, so a missing `END` marker no longer presents your prose
+  as "the block" and `/lore:status` surfaces a malformed block.
+
+### Fixed
+
+- **`count_commits` no longer reports a rewritten baseline's whole history as
+  drift.** After a rebase/squash/force-push, an old baseline SHA can survive in
+  the object store while no longer being an ancestor of `HEAD`; `BASE..HEAD` then
+  counted the entire rewritten history. A new `is_ancestor` guard makes the hook
+  and recon emit an accurate "recompute the baseline" message instead.
+- **The jq-free `state_num` now rejects non-integer thresholds like `jq` does.**
+  A value such as `3.5`, `1e2`, or `"7x"` parsed to a wrong small number without
+  `jq` while the `jq` path fell back to the default — the same committed state
+  file behaved differently depending on whether `jq` was installed.
+- **`to_epoch` keeps a timezone offset when stripping fractional seconds (BSD).**
+  A timestamp like `...00.123+05:00` had its offset deleted along with the
+  fraction and was misread as UTC.
+
+The following were committed after 0.3.0 was tagged but never released under a
+version, so they ship for the first time in 0.4.0:
+
+- **The jq-free state-file readers respect JSON nesting.** A `"disabled": true`
+  / `"watchFiles"` / `"driftThresholds"` nested inside another object no longer
+  registers as a top-level key, and a threshold is read only from
+  `driftThresholds.<key>` so a same-named key elsewhere can't shadow it (quoted
+  integers like `"50"` parse like bare integers, matching `jq`).
+- **`watchFiles` entries containing `,` or `]` no longer corrupt the list.** An
+  entry like `app/[id]/page.tsx` used to drop itself and everything after it;
+  entries are now read as whole quoted strings.
+- **Bare `YYYY-MM-DD` dates parse at midnight UTC on BSD/macOS.** `date -j` had
+  filled the missing time-of-day from the current clock, making `days_since`
+  off by up to a day; a numeric timezone offset is now honored.
 
 ## 0.3.0 — 2026-06-11
 

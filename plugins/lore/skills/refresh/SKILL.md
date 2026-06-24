@@ -1,7 +1,8 @@
 ---
-description: Keep a small lore-managed block at the top of CLAUDE.md fresh as the repo evolves. First run sets a baseline; later runs only re-derive what git shows changed. Use when the SessionStart hook reports drift, after a dependency bump or major refactor, or whenever the user wants CLAUDE.md re-blessed against the current HEAD.
-when_to_use: First-run bootstrap (no state file) or incremental refresh (state file + drift detected). Manages a small section of CLAUDE.md — stack identifiers, commands, version pins, last-refresh metadata. Never touches content outside the markers.
+description: Refresh lore's managed block at the top of CLAUDE.md — stack, commands, version pins, and last-refresh metadata — against the current HEAD. First run bootstraps a baseline; later runs re-derive only what git shows changed.
+when_to_use: Run when the SessionStart hook reports drift, after a dependency bump or major refactor, or to re-bless CLAUDE.md against HEAD. Bootstrap (no state file) or incremental refresh (state file + drift). Never touches content outside the markers.
 argument-hint: "[force]"
+disable-model-invocation: true
 allowed-tools: Read Write Edit Glob Grep Bash(bash *) Bash(git *) Bash(jq *) Bash(date *) Bash(mkdir *) Bash(cat *) Bash(ls *) Bash(head *) Bash(wc *) Bash(grep *) Bash(sed *) Bash(awk *) Bash(find *) Bash(test *) Bash(echo *)
 ---
 
@@ -26,6 +27,8 @@ Look at the live output above before doing anything.
 - State file present, drift detected → **refresh mode**.
 - `$ARGUMENTS` contains `force` → **force mode**: follow refresh mode but re-derive every field from scratch, and recreate the managed block even if the markers were deleted. Preserve user customizations in the state file (`driftThresholds`, `watchFiles`, `disabled`).
 
+The recon `=== existing CLAUDE.md lore block ===` section reports a `state:` of `create`, `insert`, `replace`, or `malformed`. **If it says `malformed`** (unbalanced or duplicate markers), STOP — do not edit CLAUDE.md. Tell the user to fix the markers by hand; the writer will refuse anyway.
+
 ## Bootstrap mode
 
 Lightweight onboard. The recon output inlines manifest excerpts — usually you need zero additional file reads. Read a file only if the excerpts are genuinely insufficient.
@@ -39,20 +42,13 @@ Lightweight onboard. The recon output inlines manifest excerpts — usually you 
 
 2. **Commands**. From the same excerpts (npm scripts, Make targets, justfile recipes), pick at most 5 that matter: install, build, test, lint, dev/run.
 
-3. **Write the lore-managed block** at the top of CLAUDE.md.
+3. **Write the block with the bundled writer.** Do NOT hand-edit CLAUDE.md. Pipe the block *body* (the metadata comments and the sections — but NOT the `BEGIN`/`END` marker lines, which the writer adds) to `apply-block.sh`:
 
-   - If `CLAUDE.md` exists with `<!-- BEGIN lore-managed` and `<!-- END lore-managed -->` markers: replace everything between (and including) the markers.
-   - If `CLAUDE.md` exists without lore markers: prepend the managed block (plus one blank line) at the top. Leave all existing content untouched.
-   - If `CLAUDE.md` does not exist: create it with the managed block followed by `<!-- Add project-specific instructions below this line. -->` so humans know where to write.
-   - If `.claude/CLAUDE.md` exists instead of root-level `CLAUDE.md`, edit that file instead.
-
-   Block format (fill `lore-version` from the recon `=== lore version ===` output, `last-refreshed` from the recon `date:` value, `last-sha` from the recon `head12:` value):
-
-   ```markdown
-   <!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->
-   <!-- lore-version: <from recon> -->
-   <!-- last-refreshed: YYYY-MM-DD -->
-   <!-- last-sha: <head12 from recon, or none> -->
+   ```bash
+   bash "${CLAUDE_SKILL_DIR}/../../lib/apply-block.sh" apply CLAUDE.md <<'LORE_BODY'
+   <!-- lore-version: <recon "=== lore version ===" output> -->
+   <!-- last-refreshed: <recon date: value, YYYY-MM-DD> -->
+   <!-- last-sha: <recon head12: value, or none outside git> -->
 
    ## Project
    <name>
@@ -64,18 +60,19 @@ Lightweight onboard. The recon output inlines manifest excerpts — usually you 
 
    ## Commands
    - Install: `...`
-   - Build: `...`   (omit if not applicable)
    - Test: `...`
+   - Build: `...`   (omit if not applicable)
    - Lint: `...`    (omit if not applicable)
    - Dev: `...`     (omit if not applicable)
-
-   <!-- END lore-managed -->
+   LORE_BODY
    ```
+
+   The writer owns the markers and performs an atomic, byte-preserving splice — you supply only the body. It creates CLAUDE.md if missing, prepends the block (plus one blank line) if the file has no markers, or replaces an existing block in place; content outside the markers is left untouched. Target the path recon reported — root `CLAUDE.md`, or `.claude/CLAUDE.md` if that is the one that exists. **If the writer exits non-zero** (malformed/duplicate markers), STOP and tell the user — do not retry or hand-edit.
 
    Hard rules:
    - Never include a section or field you couldn't confidently determine. Empty rows are worse than missing ones.
-   - Never touch content outside the markers.
-   - Block stays small: under 40 lines.
+   - The body must NOT contain `BEGIN`/`END` marker lines — the writer adds them, and a body that includes them is rejected.
+   - Block stays small: under 40 lines. Architecture and prose belong below it, written by the human.
 
 4. **Write the state file** at `.claude/lore-state.json` (create `.claude/` if needed). Use the recon `iso:` value for the date and the full HEAD SHA:
 
@@ -114,9 +111,11 @@ The recon output shows the existing managed block, the commit count, and which w
    - New top-level manifest appeared (e.g., monorepo grew) → consider adding a Stack line; usually safer to leave alone unless it's the new primary.
    - Recon says `force-rederive` (baseline commit missing) or `$ARGUMENTS` contains `force` → treat every field as potentially stale and re-derive all of them.
 
-2. **Update the managed block**, replacing the content between (and including) the existing markers. Always update `lore-version`, `last-refreshed`, and `last-sha` from the recon output, even if no other field changed. **Never touch content outside the markers.**
+2. **Write the updated block** with the bundled writer — the same `apply-block.sh apply` command as bootstrap step 3. Re-emit the full body: keep fields that are still accurate, change only what the change set affects, and always refresh `lore-version`, `last-refreshed`, and `last-sha` from the recon output even if nothing else changed. The writer replaces the block in place and preserves every byte outside the markers. Branch on the recon `state:`:
 
-   If the markers are missing (someone deleted them): in force mode, recreate the block at the top of the file; otherwise do not silently recreate — tell the user the markers were removed and ask whether to re-insert (re-running with `/lore:refresh force` is the documented path).
+   - `replace` → normal in-place update.
+   - `insert` (markers were deleted) → in non-force mode, do NOT recreate silently: tell the user the markers were removed and that `/lore:refresh force` will re-insert them. In force mode, run the writer (it prepends a fresh block).
+   - `malformed` (unbalanced/duplicate markers) → STOP. Do not edit. Tell the user to fix the markers by hand; the writer refuses this state even in force mode.
 
 3. **Update the state file**: set `lastRefreshSha` to the current full HEAD SHA, `lastRefreshDate` to the recon `iso:` value, `loreVersion` to the recon version. Preserve every other field exactly (including any `driftThresholds`, `watchFiles`, `disabled` the user added). Read the existing JSON first, then write the updated version.
 
@@ -125,7 +124,8 @@ The recon output shows the existing managed block, the commit count, and which w
 ## Edge cases
 
 - **Not a git repo**: bootstrap works without a SHA (write `null`, and `none` in the block comment). Refresh falls back to date-only drift. The recon script handles detection; you just consume its output.
-- **CLAUDE.md is a symlink** (e.g., to AGENTS.md): if the target lives inside this repo, edit the target. If outside, write to `.claude/CLAUDE.md` instead and explain in the final summary.
+- **CLAUDE.md is a symlink** (e.g., to AGENTS.md): the writer follows the link and edits the target in place, keeping the symlink intact — you don't need to resolve it. If the target lives outside the repo and you'd rather keep lore's block local, point the writer at `.claude/CLAUDE.md` instead and say so in the summary.
+- **CRLF or unusual whitespace**: the writer preserves the file's existing line endings and trailing-newline state. Do not try to normalize anything.
 
 ## What NOT to do
 
