@@ -2,8 +2,11 @@
 # lore — SessionStart hook
 #
 # Runs at session start. Stays silent unless there's something worth saying.
-# Plain stdout from a SessionStart hook is surfaced in the session, so every
-# echo below is a user-facing nudge.
+# Plain stdout from a SessionStart hook is added to Claude's context (the model
+# reads it and surfaces it to the user), so every echo below is a drift nudge.
+# /lore:refresh is user-invocable only (disable-model-invocation), so the nudge
+# prompts the user to refresh rather than letting Claude rewrite CLAUDE.md on
+# its own.
 #
 # This script never blocks the session: every exit path is 0.
 #

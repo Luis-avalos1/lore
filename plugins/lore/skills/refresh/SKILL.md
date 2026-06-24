@@ -1,7 +1,8 @@
 ---
-description: Keep a small lore-managed block at the top of CLAUDE.md fresh as the repo evolves. First run sets a baseline; later runs only re-derive what git shows changed. Use when the SessionStart hook reports drift, after a dependency bump or major refactor, or whenever the user wants CLAUDE.md re-blessed against the current HEAD.
-when_to_use: First-run bootstrap (no state file) or incremental refresh (state file + drift detected). Manages a small section of CLAUDE.md — stack identifiers, commands, version pins, last-refresh metadata. Never touches content outside the markers.
+description: Refresh lore's managed block at the top of CLAUDE.md — stack, commands, version pins, and last-refresh metadata — against the current HEAD. First run bootstraps a baseline; later runs re-derive only what git shows changed.
+when_to_use: Run when the SessionStart hook reports drift, after a dependency bump or major refactor, or to re-bless CLAUDE.md against HEAD. Bootstrap (no state file) or incremental refresh (state file + drift). Never touches content outside the markers.
 argument-hint: "[force]"
+disable-model-invocation: true
 allowed-tools: Read Write Edit Glob Grep Bash(bash *) Bash(git *) Bash(jq *) Bash(date *) Bash(mkdir *) Bash(cat *) Bash(ls *) Bash(head *) Bash(wc *) Bash(grep *) Bash(sed *) Bash(awk *) Bash(find *) Bash(test *) Bash(echo *)
 ---
 
