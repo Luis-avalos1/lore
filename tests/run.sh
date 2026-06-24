@@ -688,7 +688,7 @@ if [ -n "${LORE_TEST_NOJQ:-}" ]; then
     command -v "$tool" >/dev/null 2>&1 || MISS="$MISS $tool"
   done
   command -v jq >/dev/null 2>&1 && MISS="$MISS jq(should-be-absent)"
-  [ -z "$MISS" ] && t_pass || t_fail "shim gaps:$MISS"
+  if [ -z "$MISS" ]; then t_pass; else t_fail "shim gaps:$MISS"; fi
 fi
 
 # =================================================================

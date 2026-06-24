@@ -124,7 +124,7 @@ emit_block() {
   # Re-terminate every body line with EOL after stripping any stray CR, so the
   # block's line endings always match the file regardless of the body's input.
   printf '%s' "$body" | while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%$CR}"
+    line="${line%"$CR"}"
     printf '%s%s' "$line" "$eol"
   done
   if [ "$term" = yes ]; then
