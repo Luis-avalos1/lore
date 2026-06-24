@@ -34,7 +34,21 @@ jobs:
           shellcheck --version
           shellcheck -x --source-path=SCRIPTDIR \
             plugins/lore/lib/common.sh \
+            plugins/lore/lib/apply-block.sh \
             plugins/lore/hooks/check-state.sh \
             plugins/lore/skills/refresh/scripts/recon.sh \
             plugins/lore/skills/status/scripts/recon.sh \
             tests/run.sh
+
+  validate:
+    name: claude plugin validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Claude Code CLI
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Validate plugin + marketplace manifests
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          claude plugin validate . --strict
+          claude plugin validate ./plugins/lore --strict
