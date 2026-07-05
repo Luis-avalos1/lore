@@ -34,6 +34,8 @@ If the recon output says `watch files changed: none`, write `<X> commits since l
 
 Add one extra line ONLY if something looks off, one sentence each. Examples: the lore-managed block was removed from CLAUDE.md (suggest `/lore:refresh force`); nudges are disabled for this repo; the baseline commit is missing (rebase or shallow clone).
 
+If `dead prose refs:` lists any paths, add one line suggesting `/lore:review` to reconcile them — note that `/lore:refresh` does not fix prose (it only rewrites the managed block).
+
 ## Do not
 
 - Do not write any files.

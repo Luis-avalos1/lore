@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "lore",
-  "version": "0.4.0",
-  "description": "A staleness watchdog for CLAUDE.md. /lore:refresh keeps a small managed block (stack, commands, version pins) synced to the current commit. A SessionStart hook silently flags drift — many commits, a lockfile change, or weeks of staleness — so you know when to refresh.",
+  "version": "0.5.0",
+  "description": "A drift watchdog for the whole CLAUDE.md. /lore:refresh keeps a small managed block (stack, commands, version pins) synced to the current commit, while a deterministic scanner flags stale prose — dead file references — for /lore:review to fix. A SessionStart hook silently surfaces both, so you know when the file has fallen behind the repo.",
   "author": {
     "name": "Luis Avalos",
     "email": "avaloseluis@gmail.com"
@@ -14,6 +14,7 @@
     "claude-md",
     "drift-detection",
     "staleness",
+    "prose-drift",
     "session-hook",
     "watchdog"
   ]

@@ -20,6 +20,7 @@ shellcheck:
 	  plugins/lore/hooks/check-state.sh \
 	  plugins/lore/skills/refresh/scripts/recon.sh \
 	  plugins/lore/skills/status/scripts/recon.sh \
+	  plugins/lore/skills/review/scripts/recon.sh \
 	  tests/run.sh
 
 check: test validate shellcheck

@@ -83,8 +83,18 @@ if [ -f "$STATE" ]; then
     fi
   fi
 
-  if [ -n "$REASONS" ]; then
+  # Prose drift: dead path references in the human-written part of CLAUDE.md.
+  # /lore:refresh does NOT fix prose (it only rewrites the managed block), so
+  # prose drift points at /lore:review instead.
+  CLAUDE_MD=$(find_claude_md)
+  DEAD=$(claude_md_dead_refs "$CLAUDE_MD" | join_commas)
+
+  if [ -n "$REASONS" ] && [ -n "$DEAD" ]; then
+    echo "lore: drift since last refresh ($REASONS) and CLAUDE.md prose references paths that no longer exist ($DEAD). Run /lore:refresh to update the managed block and /lore:review to check the prose."
+  elif [ -n "$REASONS" ]; then
     echo "lore: drift since last refresh ($REASONS). Run /lore:refresh to update the managed block in CLAUDE.md."
+  elif [ -n "$DEAD" ]; then
+    echo "lore: CLAUDE.md prose references paths that no longer exist ($DEAD). Run /lore:review to check it."
   fi
   exit 0
 fi

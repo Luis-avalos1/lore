@@ -1,6 +1,6 @@
 ---
-description: Refresh lore's managed block at the top of CLAUDE.md — stack, commands, version pins, and last-refresh metadata — against the current HEAD. First run bootstraps a baseline; later runs re-derive only what git shows changed.
-when_to_use: Run when the SessionStart hook reports drift, after a dependency bump or major refactor, or to re-bless CLAUDE.md against HEAD. Bootstrap (no state file) or incremental refresh (state file + drift). Never touches content outside the markers.
+description: Refresh lore's managed block at the top of CLAUDE.md — stack, commands, version pins, and last-refresh metadata — against the current HEAD. This is the managed-block payload only; it does not touch prose, use /lore:review for prose staleness. First run bootstraps a baseline; later runs re-derive only what git shows changed.
+when_to_use: Run when the SessionStart hook reports managed-block drift (commits, watched manifest, or elapsed days), after a dependency bump or major refactor, or to re-bless CLAUDE.md against HEAD. Bootstrap (no state file) or incremental refresh (state file + drift). Only ever edits between the managed markers; never touches surrounding prose — that is /lore:review's job.
 argument-hint: "[force]"
 disable-model-invocation: true
 allowed-tools: Read Write Edit Glob Grep Bash(bash *) Bash(git *) Bash(jq *) Bash(date *) Bash(mkdir *) Bash(cat *) Bash(ls *) Bash(head *) Bash(wc *) Bash(grep *) Bash(sed *) Bash(awk *) Bash(find *) Bash(test *) Bash(echo *)
