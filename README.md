@@ -1,8 +1,8 @@
 # lore
 
-> A staleness watchdog for `CLAUDE.md`. Tells you when your repo has drifted past what Claude Code remembers, and refreshes a small managed block so the basics stay current.
+> A drift watchdog for the whole `CLAUDE.md`. Tells you when your repo has moved past what Claude Code remembers, refreshes a small managed block so the basics stay current, and flags stale prose so the rest stays honest too.
 
-`lore` does one thing: it keeps the top of your `CLAUDE.md` honest. It manages a tiny block — stack identifiers, the install/build/test commands, last-refresh metadata — and pings you when too many commits or a lockfile change make that block stale. Everything else in `CLAUDE.md` stays under your control.
+`lore` keeps your `CLAUDE.md` honest. It watches for two kinds of drift: the managed block it owns (stack identifiers, install/build/test commands, last-refresh metadata) going stale as commits pile up, and the human-written prose making claims the repo no longer backs — a file it points at that no longer exists. It nudges you when either has drifted; you decide when to fix it.
 
 ## Why a watchdog, not an onboarder?
 
@@ -11,9 +11,14 @@ Claude Code already has good built-ins for the heavy lifting:
 - **`/init`** generates a starting `CLAUDE.md` from scratch.
 - **Auto memory** (v2.1.59+) writes per-project notes automatically as Claude works.
 
-What it doesn't have: anything that *notices* when your `CLAUDE.md` falls out of sync with the actual repo. You bump a major dependency, add a new test runner, restructure scripts — and the file sitting at the root quietly goes stale. Claude keeps reading it as truth.
+What it doesn't have: anything that *notices* when your `CLAUDE.md` falls out of sync with the actual repo. You bump a major dependency, add a new test runner, restructure scripts, move the file a paragraph points at — and the file sitting at the root quietly goes stale. Claude keeps reading it as truth.
 
-That's the gap lore fills. Use `/init` to bootstrap `CLAUDE.md`, then let lore manage a small section of it and tell you when reality has moved.
+That's the gap lore fills, across the whole file. Two payloads share one watchdog:
+
+- **The managed block** — a small section lore owns and rewrites deterministically. Commit count, a watched manifest change, or elapsed days signal drift; `/lore:refresh` re-derives it.
+- **The prose** — everything you (or `/init`) wrote. A conservative dead-reference scanner flags backticked paths and links that point at files no longer in the repo; `/lore:review` verifies and fixes them.
+
+Use `/init` to bootstrap `CLAUDE.md`, then let lore watch the whole thing and tell you when reality has moved.
 
 ## Install
 
@@ -26,22 +31,32 @@ Two commands, once. Reload (`/reload-plugins`) or restart Claude Code. Now `/lor
 
 ## Use it
 
-Two skills, plus a silent hook:
+Three skills, plus a silent hook:
 
 | Command               | What it does                                                                                              |
 | :-------------------- | :-------------------------------------------------------------------------------------------------------- |
-| `/lore:refresh`       | First run: writes a small managed block at the top of `CLAUDE.md` (stack, commands) and records a baseline. Later runs: only re-derives what git shows changed. |
+| `/lore:refresh`       | First run: writes a small managed block at the top of `CLAUDE.md` (stack, commands) and records a baseline. Later runs: only re-derives what git shows changed. Managed block only — never touches your prose. |
 | `/lore:refresh force` | Re-derives every field from scratch and recreates the block even if the markers were deleted.             |
-| `/lore:status`        | Read-only. Reports last-refresh date, current drift, and the effective thresholds. Won't touch anything.  |
+| `/lore:review`        | Model-driven review of your `CLAUDE.md` **prose**. Verifies each flagged dead reference, hunts other stale claims, proposes edits, and applies them — outside the managed markers only. |
+| `/lore:status`        | Read-only. Reports last-refresh date, current drift, dead prose references, and the effective thresholds. Won't touch anything. |
 
 The **SessionStart hook** runs silently every time Claude Code starts. It prints a single line only when:
 
-- You're in a repo with a lore baseline and the repo has **drifted**: ≥20 commits touching the project since the last refresh, a watched manifest (`package.json`, `Cargo.toml`, `go.mod`, lockfiles, `Makefile`, version-pin files like `.nvmrc`, etc.) changed, ≥60 days passed, or the baseline commit no longer exists (history rewritten). All triggered signals are combined into one line. → Suggests `/lore:refresh`.
+- You're in a repo with a lore baseline and the managed block has **drifted**: ≥20 commits touching the project since the last refresh, a watched manifest (`package.json`, `Cargo.toml`, `go.mod`, lockfiles, `Makefile`, version-pin files like `.nvmrc`, etc.) changed, ≥60 days passed, or the baseline commit no longer exists (history rewritten). → Suggests `/lore:refresh`.
+- Your `CLAUDE.md` **prose has drifted**: it references files that no longer exist. → Suggests `/lore:review`.
 - You're in a "real" repo (git, ≥10 commits, has a manifest) that lore **hasn't bootstrapped yet**. → Suggests `/lore:refresh` (and `/init` first if there's no `CLAUDE.md` at all). If `CLAUDE.md` already has a lore block but the local baseline is missing, you probably just cloned — the nudge says so.
 
-In every other case the hook is silent. The check is a small shell script — zero model tokens, zero context cost when nothing fires.
+All triggered signals are combined into one line. In every other case the hook is silent. The check is a small shell script — zero model tokens, zero context cost when nothing fires.
 
 Monorepos: lore is scoped to the directory you opened. Watched files are matched relative to the project directory, and only commits touching that directory count toward drift — so a baseline in `apps/web` isn't spooked by churn in `apps/api`.
+
+## The prose-drift signal
+
+The managed block is only one payload lore watches; the prose you wrote is the other. A deterministic scanner (`claude_md_dead_refs` in [`lib/common.sh`](plugins/lore/lib/common.sh)) reads the human text and flags **dead references** — a backticked token or a Markdown link target that looks like a repo path, whose parent directory exists but the path itself doesn't. That pattern (`src/auth/` is there, `src/auth/session.ts` was renamed) is a stale claim you can act on.
+
+It is deliberately conservative: a false positive — nagging about a path that's fine — erodes trust faster than a quiet miss, so the scanner skips anything it can't be sure about. It ignores URLs, globs, placeholders (`<name>`, `path/to/…`), refs that escape the project dir (`../`, absolute paths — unverifiable from here), anything inside fenced code, common build-output directories (`node_modules`, `dist`, `target`, …), and the managed block itself. It reports at most 5 refs, and only ever *flags* — the hook and `/lore:status` name the dead paths, and `/lore:review` verifies each one before touching anything.
+
+Detecting **stale commands** (a documented `npm run build` that no longer exists) was deliberately deferred: distinguishing a dead script from one defined in a Makefile, justfile, tool alias, or shell function can't be done reliably from prose alone, and the false-positive budget didn't allow it.
 
 ## What the managed block looks like
 
@@ -49,7 +64,7 @@ A short block at the top of your `CLAUDE.md`, wrapped in HTML comments. The mark
 
 ```markdown
 <!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->
-<!-- lore-version: 0.4.0 -->
+<!-- lore-version: 0.5.0 -->
 <!-- last-refreshed: 2026-06-11 -->
 <!-- last-sha: 9a7c1d4e22b1 -->
 
@@ -98,7 +113,7 @@ It records the last-refresh SHA and date. lore adds it to `.gitignore` on first 
 ```json
 {
   "version": 1,
-  "loreVersion": "0.4.0",
+  "loreVersion": "0.5.0",
   "lastRefreshSha": "9a7c1d4e22b1…",
   "lastRefreshDate": "2026-06-11T18:04:05Z",
   "repoRoot": "/path/to/repo",

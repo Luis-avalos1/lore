@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.0
+
+The "watch the whole file" release. lore is repositioned from a managed-block
+watchdog to a drift watchdog for the entire `CLAUDE.md`: alongside the existing
+managed-block signals, a deterministic scanner now flags stale human prose, and
+a new `/lore:review` skill fixes it.
+
+### Added
+
+- **Prose dead-reference detection (`claude_md_dead_refs` in `lib/common.sh`).**
+  A conservative, deterministic scanner reads the human prose and flags
+  backticked tokens and Markdown link targets that look like repo paths whose
+  parent directory exists but the path doesn't. It skips URLs, globs,
+  placeholders, fenced code, build-output directories, and the managed block
+  itself, and reports at most 5 — false positives cost more trust than a quiet
+  miss. Shared by the hook, `/lore:status`, and `/lore:review`.
+- **`/lore:review` — a model-driven review of `CLAUDE.md` prose.** Verifies each
+  flagged dead reference, hunts other stale claims, proposes edits, and applies
+  them to the prose only, never inside the managed markers.
+- The SessionStart hook and `/lore:status` now surface dead prose references
+  (the hook nudges toward `/lore:review`), combined into the existing one-line
+  output.
+
+### Changed
+
+- **Repositioned as a drift watchdog for the whole `CLAUDE.md`.** The managed
+  block is now one of two payloads lore watches; the prose is the other.
+  `/lore:refresh` still owns the managed block and never touches prose;
+  `/lore:review` owns the prose and never touches the managed block.
+
+### Deferred
+
+- **Stale-command detection.** Flagging a documented command that no longer
+  exists can't be done reliably from prose alone — a script may live in a
+  Makefile, justfile, tool alias, or shell function — so it was left out rather
+  than spend the false-positive budget on guesses.
+
 ## 0.4.0
 
 The "never corrupt your CLAUDE.md" release. The managed-block edit is now done

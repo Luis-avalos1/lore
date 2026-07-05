@@ -78,6 +78,12 @@ for f in CLAUDE.md .claude/CLAUDE.md; do
     else
       echo "$f: present, no lore-managed block"
     fi
+    # Same shared scan, on the same single file the hook picks (find_claude_md),
+    # so status and hook can't disagree even when both CLAUDE.md locations exist.
+    if [ "$f" = "$(find_claude_md)" ]; then
+      DEAD=$(claude_md_dead_refs "$f" | join_commas)
+      echo "dead prose refs: ${DEAD:-none}"
+    fi
   fi
 done
 if [ "$FOUND_ANY" -eq 0 ]; then

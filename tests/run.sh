@@ -18,6 +18,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HOOK="$ROOT/plugins/lore/hooks/check-state.sh"
 REFRESH_RECON="$ROOT/plugins/lore/skills/refresh/scripts/recon.sh"
 STATUS_RECON="$ROOT/plugins/lore/skills/status/scripts/recon.sh"
+REVIEW_RECON="$ROOT/plugins/lore/skills/review/scripts/recon.sh"
 PLUGIN_JSON="$ROOT/plugins/lore/.claude-plugin/plugin.json"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/lore-tests.XXXXXX") || exit 1
@@ -37,6 +38,12 @@ unset CLAUDE_PROJECT_DIR LORE_DISABLE 2>/dev/null || true
 OLD_DATE="1999-01-02T03:04:05Z"
 NOW_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 BOGUS_SHA="0123456789abcdef0123456789abcdef01234567"
+
+# A literal backtick kept in a variable so the markdown code spans below read as
+# data, not command substitution (keeps shellcheck's SC2016 quiet without
+# per-line disables).
+BT='`'
+
 
 TESTS=0
 FAILS=0
@@ -476,6 +483,38 @@ expect_out "status recon: date-only drift outside git" \
   "$STATUS_RECON" "$D" "date only" "days since last refresh"
 
 # =================================================================
+# Review recon
+# =================================================================
+
+# Dead ref + managed-block line range. The scanner flags a backtick path only
+# when its PARENT dir exists but the token doesn't, so make docs/ real and cite
+# a missing file inside it.
+D="$TMP/review-drift"; mkrepo "$D"
+mkdir -p "$D/docs"; : >"$D/docs/keep.md"
+claude_md_with_block "$D"   # writes the managed block (starts at line 1)
+cat >>"$D/CLAUDE.md" <<EOF
+
+## Architecture
+The entrypoint lives in ${BT}docs/gone.md${BT}.
+EOF
+(cd "$D" && git add -A && git commit -qm docs) >/dev/null 2>&1
+expect_out "review recon: reports managed-block range, dead ref, and inlines the file" \
+  "$REVIEW_RECON" "$D" \
+  "managed block: lines 1-" "DO NOT EDIT" "docs/gone.md" "deterministic pre-scan" "=== full CLAUDE.md ==="
+
+# No CLAUDE.md — nothing to review.
+D="$TMP/review-none"; mkrepo "$D"
+expect_out "review recon: reports no CLAUDE.md" \
+  "$REVIEW_RECON" "$D" "no CLAUDE.md" "(none detected)"
+
+# Prose with no managed block: whole file reviewable, no false OFF-LIMITS range.
+D="$TMP/review-noblock"; mkrepo "$D"
+printf '## Notes\nplain prose, no markers\n' >"$D/CLAUDE.md"
+(cd "$D" && git add -A && git commit -qm md) >/dev/null 2>&1
+expect_out "review recon: no managed block means all prose is reviewable" \
+  "$REVIEW_RECON" "$D" "managed block: none"
+
+# =================================================================
 # apply-block: deterministic managed-block writer (golden bytes)
 # =================================================================
 
@@ -676,6 +715,143 @@ D="$TMP/recon-make"; mkrepo "$D"
 printf 'build:\n\techo b\ntest:\n\techo t\n' >"$D/Makefile"
 ( cd "$D" && git add -A && git commit -qm mk )
 expect_out "refresh recon: lists Makefile targets in bootstrap context" "$REFRESH_RECON" "$D" "Makefile targets"
+
+# =================================================================
+# Hook + status: prose-drift detection (dead path refs in CLAUDE.md)
+# =================================================================
+
+# freshstate DIR — a non-drifting Branch-A state (current SHA + now), so any
+# nudge in these fixtures must come from prose drift alone.
+freshstate() {
+  wstate "$1" '"version": 1' "\"lastRefreshSha\": \"$(hsha "$1")\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+}
+
+# 1. dead subpath under an existing dir → /lore:review, never /lore:refresh.
+D="$TMP/prose-dead"; mkrepo "$D"
+commitfile "$D" src/real.ts 'export const x = 1'
+printf '%s\n' "See ${BT}src/gone.ts${BT} for details." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_out "hook: prose dead ref suggests /lore:review" \
+  "$HOOK" "$D" "no longer exist" "src/gone.ts" "/lore:review"
+expect_not_out "hook: prose-only drift does not suggest /lore:refresh" \
+  "$HOOK" "$D" "/lore:refresh"
+
+# 2. referenced path exists → silent.
+D="$TMP/prose-live"; mkrepo "$D"
+commitfile "$D" src/real.ts 'export const x = 1'
+printf '%s\n' "See ${BT}src/real.ts${BT} for details." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: silent when the referenced path exists" "$HOOK" "$D"
+
+# 3. FP guard: command line + slash-less dotfile → silent.
+D="$TMP/prose-noslash"; mkrepo "$D"
+printf '%s\n' "Run ${BT}npm run test:e2e${BT} and copy ${BT}.env.local${BT}." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: no-slash tokens are not treated as paths" "$HOOK" "$D"
+
+# 4. FP guard: build-output path with no such dir → silent.
+D="$TMP/prose-dist"; mkrepo "$D"
+printf '%s\n' "Bundled to ${BT}dist/bundle.js${BT}." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: build-output first segment with no dir is not flagged" "$HOOK" "$D"
+
+# 5. FP guard: glob / placeholder / URL → silent.
+D="$TMP/prose-glob"; mkrepo "$D"
+printf '%s\n' "Globs ${BT}src/**/*.ts${BT}, placeholder ${BT}<root>/x${BT}, URL https://x/y here." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: globs, placeholders, and URLs are not flagged" "$HOOK" "$D"
+
+# 6. dead ref only inside the managed block → silent (src/ exists, so the skip
+#    is what keeps it quiet, not a missing parent dir).
+D="$TMP/prose-inblock"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+cat >"$D/CLAUDE.md" <<'EOF'
+<!-- BEGIN lore-managed: do not edit between these markers. Run /lore:refresh to update. -->
+Entry point `src/gone.ts`.
+<!-- END lore-managed -->
+
+Human notes.
+EOF
+freshstate "$D"
+expect_silent "hook: dead ref inside the managed block is ignored" "$HOOK" "$D"
+
+# 7. dead ref (as a link) inside a fenced code block → silent.
+D="$TMP/prose-fence"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+printf '%s\n' "${BT}${BT}${BT}" "[x](src/gone.ts)" "${BT}${BT}${BT}" >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: dead ref inside a fenced code block is ignored" "$HOOK" "$D"
+
+# 8. link target with #anchor pointing at an existing file → silent.
+D="$TMP/prose-anchor"; mkrepo "$D"
+commitfile "$D" docs/guide.md 'g'
+printf 'See [the guide](docs/guide.md#setup).\n' >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: link target with #anchor to an existing file is not flagged" "$HOOK" "$D"
+
+# 9a. cap at 5 + dedup: 7 distinct dead paths (plus a repeat) under existing pkg/.
+D="$TMP/prose-cap"; mkrepo "$D"
+commitfile "$D" pkg/keep.ts 'x'
+printf '%s\n' "Refs: ${BT}pkg/a.ts${BT} ${BT}pkg/b.ts${BT} ${BT}pkg/c.ts${BT} ${BT}pkg/d.ts${BT} ${BT}pkg/e.ts${BT} ${BT}pkg/f.ts${BT} ${BT}pkg/g.ts${BT} ${BT}pkg/a.ts${BT}." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_out "hook: reports the first prose refs" \
+  "$HOOK" "$D" "pkg/a.ts" "pkg/b.ts" "pkg/e.ts"
+expect_not_out "hook: caps prose refs at 5 (7th distinct not shown)" \
+  "$HOOK" "$D" "pkg/g.ts"
+
+# 9b. combined: managed drift (21 commits) + prose drift → ONE line, both commands.
+D="$TMP/prose-both"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+SHA=$(hsha "$D")
+addcommits "$D" 21
+printf '%s\n' "See ${BT}src/gone.ts${BT}." >"$D/CLAUDE.md"
+wstate "$D" '"version": 1' "\"lastRefreshSha\": \"$SHA\"" "\"lastRefreshDate\": \"$NOW_DATE\""
+expect_out "hook: combined managed+prose drift is one line with both commands" \
+  "$HOOK" "$D" "21 commits" "src/gone.ts" \
+  "update the managed block and /lore:review to check the prose"
+
+# 10. CRLF CLAUDE.md with a dead ref → flagged.
+D="$TMP/prose-crlf"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+printf '%s\r\n' "See ${BT}src/gone.ts${BT} now." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_out "hook: flags a dead ref in a CRLF CLAUDE.md" \
+  "$HOOK" "$D" "src/gone.ts" "/lore:review"
+
+# 11. status recon reports the same dead refs the hook nudges on.
+D="$TMP/prose-status"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+printf '%s\n' "See ${BT}src/gone.ts${BT}." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_out "status recon: reports dead prose refs consistently with the hook" \
+  "$STATUS_RECON" "$D" "dead prose refs: src/gone.ts"
+D="$TMP/prose-status-clean"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+printf '%s\n' "See ${BT}src/real.ts${BT}." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_out "status recon: reports 'dead prose refs: none' when clean" \
+  "$STATUS_RECON" "$D" "dead prose refs: none"
+
+# 12. ..-escaping refs point outside the repo and can't be verified from here;
+# dirname of "../x" is ".." which always exists, so without an explicit guard
+# they'd all be flagged. (Adversarial-review regression.)
+D="$TMP/prose-dotdot"; mkrepo "$D"
+printf '%s\n' "See ${BT}../../CONTRIBUTING.md${BT} and ${BT}../NOTES.md${BT}." >"$D/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: ..-escaping refs are not flagged" "$HOOK" "$D"
+
+# 13. Hook/status parity when BOTH CLAUDE.md locations exist: the hook scans
+# only find_claude_md's pick (root CLAUDE.md), so a dead ref in the other file
+# must not make status disagree with a silent hook. (Adversarial-review
+# regression.)
+D="$TMP/prose-two-files"; mkrepo "$D"
+commitfile "$D" src/real.ts 'x'
+printf '%s\n' "See ${BT}src/real.ts${BT}." >"$D/CLAUDE.md"
+printf '%s\n' "See ${BT}src/gone.ts${BT}." >"$D/.claude/CLAUDE.md"
+freshstate "$D"
+expect_silent "hook: silent when only the non-picked CLAUDE.md has a dead ref" "$HOOK" "$D"
+expect_not_out "status recon: does not report dead refs the hook would not nudge on" \
+  "$STATUS_RECON" "$D" "src/gone.ts"
 
 # Meta-test (no-jq pass only): the shim must cover every external tool the
 # scripts and this suite invoke, and must exclude jq — otherwise the fallback

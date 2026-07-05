@@ -326,3 +326,72 @@ find_claude_md() {
 has_lore_block() {
   [ -n "$1" ] && grep -q 'BEGIN lore-managed' "$1" 2>/dev/null
 }
+
+# claude_md_dead_refs FILE — scan the human prose of a CLAUDE.md for repo-relative
+# path references that no longer exist. Prints them one per line, deduped, in
+# first-seen order, capped at 5. Always returns 0; prints nothing when FILE is
+# missing/empty/clean. Assumes the caller already cd'd to the project dir.
+#
+# ponytail: heuristic prose scan — candidates are only backtick spans and
+# markdown link targets, and a token is flagged only when its PARENT directory
+# exists but the token itself doesn't. That parent-exists gate is the whole
+# conservatism: gitignored/build-output trees are absent along with their parent
+# dir, so they're never flagged — no .gitignore parsing needed. Upgrade path (if
+# false positives show up): parse .gitignore, or track link-vs-code provenance.
+claude_md_dead_refs() {
+  local file="$1" tok first parent count=0 seen="" cr
+  [ -n "$file" ] && [ -s "$file" ] || return 0
+  cr=$(printf '\r')
+  # One awk pass emits raw candidate tokens, skipping the managed block
+  # (BEGIN..END inclusive) and fenced code blocks; the bash loop below applies
+  # exclusions, the existence tests, dedup, and the cap.
+  awk '
+    /<!-- BEGIN lore-managed/ { inblock = 1 }
+    inblock { if (/<!-- END lore-managed/) inblock = 0; next }
+    /^[[:space:]]*```/ || /^[[:space:]]*~~~/ { infence = !infence; next }
+    infence { next }
+    {
+      n = split($0, parts, "`")            # inside-backtick spans are the even fields
+      for (i = 2; i <= n; i += 2) print parts[i]
+      s = $0                               # markdown link targets: ](target)
+      while (match(s, /\]\([^)]*\)/)) {
+        print substr(s, RSTART + 2, RLENGTH - 3)
+        s = substr(s, RSTART + RLENGTH)
+      }
+    }
+  ' "$file" 2>/dev/null | while IFS= read -r tok; do
+    tok="${tok%"$cr"}"                     # trailing CR (CRLF files)
+    tok="${tok#./}"                        # leading ./
+    tok="${tok%%#*}"                        # trailing #fragment (link targets)
+    while : ; do                           # trailing punctuation
+      case "$tok" in
+        *[.,\;:\)\]\}]) tok="${tok%?}" ;;
+        *) break ;;
+      esac
+    done
+    tok="${tok%/}"                         # one trailing slash
+    case "$tok" in
+      */*) : ;;                            # a path reference has a slash
+      *) continue ;;
+    esac
+    case "$tok" in
+      *"://"*|mailto:*|tel:*|'#'*) continue ;;                # URLs / schemes / anchors
+      /*|'~'*|-*) continue ;;                                 # absolute / home / flag-like
+      ..*|*/../*) continue ;;                                 # escapes the repo — unverifiable from here
+      *'<'*|*'>'*|*'$'*|*'{'*|*'}'*|*'*'*|*'?'*|*' '*|*'|'*|*';'*|*'&'*|*'"'*|*"'"*|*'`'*) continue ;;
+      *path/to*|*foo/bar*|*example*|*...*) continue ;;        # obvious placeholders
+    esac
+    first="${tok%%/*}"
+    case "$first" in
+      node_modules|dist|build|out|target|coverage|.next|vendor|__pycache__|.venv) continue ;;
+    esac
+    parent=$(dirname "$tok")
+    [ -d "$parent" ] && [ ! -e "$tok" ] || continue
+    case "$seen" in *"|$tok|"*) continue ;; esac             # dedup, first-seen order
+    seen="$seen|$tok|"
+    printf '%s\n' "$tok"
+    count=$((count + 1))
+    [ "$count" -ge 5 ] && break            # cap
+  done
+  return 0
+}
