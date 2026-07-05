@@ -386,7 +386,8 @@ claude_md_dead_refs() {
       node_modules|dist|build|out|target|coverage|.next|vendor|__pycache__|.venv) continue ;;
     esac
     parent=$(dirname "$tok")
-    [ -d "$parent" ] && [ ! -e "$tok" ] || continue
+    # keep only a live dead-ref: parent dir exists but the token itself does not
+    if [ ! -d "$parent" ] || [ -e "$tok" ]; then continue; fi
     case "$seen" in *"|$tok|"*) continue ;; esac             # dedup, first-seen order
     seen="$seen|$tok|"
     printf '%s\n' "$tok"
